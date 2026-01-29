@@ -1,0 +1,80 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build outputs
+dist/
+dist-electron/
+build/
+out/
+*.local
+
+# Environment variables - NEVER COMMIT THESE
+.env
+.env.local
+.env.*.local
+*.env
+
+# IDE
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# OS
+Thumbs.db
+
+# Electron
+release/
+app/dist/
+packages/
+
+# Testing
+coverage/
+.nyc_output/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Python (for generated apps)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# User data and generated files
+storage/
+*.db
+*.sqlite
+app-data/
+
+# Sensitive - API keys, tokens, credentials
+**/secrets.json
+**/credentials.json
+**/*-key.json
+**/*-secret.*
+
+# Project-specific
+apps/desktop/electron-builder.yml
+
+# Don't ignore example files
+!.env.example
+!**/*.example
+
+# Keep important config
+!.vscode/settings.json
+!.vscode/extensions.json

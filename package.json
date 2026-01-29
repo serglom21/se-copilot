@@ -1,0 +1,20 @@
+{
+  "name": "se-copilot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SE Copilot - Sentry instrumentation planner and reference app generator",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "pnpm --filter @se-copilot/desktop dev",
+    "build": "pnpm --filter @se-copilot/desktop build",
+    "test": "pnpm -r test"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=8.0.0"
+  },
+  "packageManager": "pnpm@8.15.0"
+}
