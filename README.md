@@ -1,5 +1,10 @@
 # SE Copilot
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue.svg)](https://www.typescriptlang.org/)
+[![Electron](https://img.shields.io/badge/Electron-28-47848F.svg)](https://www.electronjs.org/)
+[![React](https://img.shields.io/badge/React-18-61DAFB.svg)](https://react.dev/)
+
 SE Copilot is a desktop application for Sentry Sales Engineers to streamline the creation of instrumentation plans, reference applications, and demo dashboards.
 
 ## Features
