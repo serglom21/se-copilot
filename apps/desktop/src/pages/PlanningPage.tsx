@@ -119,8 +119,22 @@ export default function PlanningPage() {
     } else {
       updateSpan(editingSpan.index, editingSpan.span);
     }
-    
+
     setEditingSpan(null);
+  };
+
+  const handleDeleteAllSpans = () => {
+    if (!currentProject) return;
+
+    const spanCount = currentProject.instrumentation.spans.length;
+    if (spanCount === 0) return;
+
+    if (confirm(`Delete all ${spanCount} span(s)? This cannot be undone.`)) {
+      // Delete in reverse order to avoid index shifting issues
+      for (let i = spanCount - 1; i >= 0; i--) {
+        deleteSpan(i);
+      }
+    }
   };
 
   if (!currentProject) {
@@ -228,6 +242,15 @@ export default function PlanningPage() {
             <Button size="sm" onClick={handleAddSpan}>
               ➕ Add Span
             </Button>
+            {currentProject.instrumentation.spans.length > 0 && (
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={handleDeleteAllSpans}
+              >
+                🗑️ Delete All
+              </Button>
+            )}
             <Button size="sm" onClick={handleLockPlan}>
               🔒 Lock Plan
             </Button>
