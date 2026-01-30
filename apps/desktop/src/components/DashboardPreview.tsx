@@ -27,6 +27,7 @@ const CHART_COLORS = [
 export default function DashboardPreview({ dashboardPath }: DashboardPreviewProps) {
   const [dashboard, setDashboard] = React.useState<{ title: string; widgets: DashboardWidget[] } | null>(null);
   const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     loadDashboard();
@@ -34,11 +35,16 @@ export default function DashboardPreview({ dashboardPath }: DashboardPreviewProp
 
   const loadDashboard = async () => {
     try {
+      console.log('Loading dashboard from:', dashboardPath);
       const content = await window.electronAPI.readFile(dashboardPath);
+      console.log('Dashboard content loaded, length:', content.length);
       const data = JSON.parse(content);
+      console.log('Dashboard parsed, widgets:', data.widgets?.length);
       setDashboard(data);
+      setError(null);
     } catch (error) {
       console.error('Failed to load dashboard:', error);
+      setError(String(error));
     } finally {
       setLoading(false);
     }
@@ -131,6 +137,16 @@ export default function DashboardPreview({ dashboardPath }: DashboardPreviewProp
     return (
       <div className="flex items-center justify-center py-12">
         <div className="text-gray-500">Loading dashboard preview...</div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-800">
+        <strong>❌ Error loading dashboard</strong>
+        <p className="mt-1">{error}</p>
+        <p className="mt-2 text-xs text-red-600">Path: {dashboardPath}</p>
       </div>
     );
   }
