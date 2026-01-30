@@ -133,14 +133,15 @@ export default function PublishPage() {
             : 'Push your generated reference app to a new GitHub repository'}
         </p>
         {hasExistingRepo && currentProject?.project.githubRepoUrl && (
-          <a
-            href={currentProject.project.githubRepoUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-purple-600 hover:underline text-sm mt-1 inline-block"
+          <button
+            onClick={(e) => {
+              e.preventDefault();
+              window.electronAPI.openInChrome(currentProject.project.githubRepoUrl!);
+            }}
+            className="text-purple-600 hover:underline text-sm mt-1 inline-block cursor-pointer bg-transparent border-none p-0"
           >
             Current repo: {currentProject.project.githubRepoName} →
-          </a>
+          </button>
         )}
       </div>
 
@@ -208,14 +209,15 @@ export default function PublishPage() {
                     <p className="text-sm text-purple-800 mb-2">
                       This project is already connected to a GitHub repository. Clicking "Push Update" will commit and push your latest changes.
                     </p>
-                    <a
-                      href={currentProject?.project.githubRepoUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-sm text-purple-600 hover:underline"
+                    <button
+                      onClick={(e) => {
+                        e.preventDefault();
+                        window.electronAPI.openInChrome(currentProject?.project.githubRepoUrl!);
+                      }}
+                      className="text-sm text-purple-600 hover:underline cursor-pointer bg-transparent border-none p-0"
                     >
                       View on GitHub →
-                    </a>
+                    </button>
                   </div>
                 </div>
               </div>
@@ -273,14 +275,12 @@ export default function PublishPage() {
               </p>
               <div className="flex gap-3">
                 {publishResult.repoUrl && (
-                  <a
-                    href={publishResult.repoUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-block bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition-colors"
+                  <button
+                    onClick={() => window.electronAPI.openInChrome(publishResult.repoUrl!)}
+                    className="inline-block bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition-colors cursor-pointer border-none"
                   >
                     View on GitHub →
-                  </a>
+                  </button>
                 )}
                 <Button
                   variant="secondary"

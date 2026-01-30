@@ -69,6 +69,9 @@ export interface IElectronAPI {
 
   // Events
   onMainProcessMessage: (callback: (message: string) => void) => void;
+
+  // Browser
+  openInChrome: (url: string) => Promise<void>;
 }
 
 const electronAPI: IElectronAPI = {
@@ -151,7 +154,10 @@ const electronAPI: IElectronAPI = {
   // Events
   onMainProcessMessage: (callback) => {
     ipcRenderer.on('main-process-message', (_event, message) => callback(message));
-  }
+  },
+
+  // Browser
+  openInChrome: (url) => ipcRenderer.invoke('browser:open-in-chrome', url)
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);

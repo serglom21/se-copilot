@@ -268,9 +268,12 @@ export default function GeneratePage() {
                   <div className="text-sm text-purple-900">
                     <strong>✓ Pushed to Sentry!</strong>
                     <br />
-                    <a href={dashboardPushResult.dashboardUrl} target="_blank" rel="noopener noreferrer" className="text-purple-600 hover:underline">
+                    <button
+                      onClick={() => window.electronAPI.openInChrome(dashboardPushResult.dashboardUrl!)}
+                      className="text-purple-600 hover:underline cursor-pointer bg-transparent border-none p-0"
+                    >
                       View Dashboard →
-                    </a>
+                    </button>
                   </div>
                 </div>
               )}

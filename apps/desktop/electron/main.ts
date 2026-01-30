@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { exec } from 'child_process';
 import { StorageService } from './services/storage';
 import { LLMService } from './services/llm';
 import { GeneratorService } from './services/generator';
@@ -273,16 +274,36 @@ function setupIpcHandlers() {
   // Regenerate artifacts after refinement
   ipcMain.handle('refine:regenerate-artifacts', async (_, projectId: string) => {
     const project = storage.getProject(projectId);
-    
+
     // Regenerate guide and dashboard with updated code
     const guideResult = await generatorService.generateImplementationGuide(project);
     const dashboardResult = await generatorService.generateDashboardJSON(project);
-    
+
     return {
       success: guideResult.success && dashboardResult.success,
       guideError: guideResult.error,
       dashboardError: dashboardResult.error
     };
+  });
+
+  // Browser
+  ipcMain.handle('browser:open-in-chrome', async (_, url: string) => {
+    return new Promise((resolve, reject) => {
+      const command = process.platform === 'darwin'
+        ? `open -a "Google Chrome" "${url}"`
+        : process.platform === 'win32'
+        ? `start chrome "${url}"`
+        : `google-chrome "${url}"`;
+
+      exec(command, (error) => {
+        if (error) {
+          console.error('Failed to open in Chrome:', error);
+          // Fallback to default browser
+          shell.openExternal(url);
+        }
+        resolve();
+      });
+    });
   });
 }
 
