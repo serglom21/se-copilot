@@ -4,7 +4,7 @@ import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 interface DashboardWidget {
   title: string;
   displayType: string;
-  query: string;
+  query?: string;
   widgetType?: string;
   interval?: string;
   series?: { name: string; color: string }[];
@@ -62,7 +62,7 @@ export default function DashboardPreview({ dashboardPath }: DashboardPreviewProp
       const dataPoint: any = { time: timeStr };
 
       // Parse series from query or use default
-      const series = extractSeriesFromQuery(widget.query);
+      const series = extractSeriesFromQuery(widget.query || '');
 
       series.forEach((seriesName, idx) => {
         // Generate realistic data based on widget type
@@ -100,6 +100,10 @@ export default function DashboardPreview({ dashboardPath }: DashboardPreviewProp
   const extractSeriesFromQuery = (query: string): string[] => {
     // Try to extract span/transaction names from the query
     // Parse patterns like: span.op:checkout, transaction:api/users, etc.
+
+    if (!query || query.trim() === '') {
+      return ['count()'];
+    }
 
     const series: string[] = [];
 
@@ -171,7 +175,7 @@ export default function DashboardPreview({ dashboardPath }: DashboardPreviewProp
       <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-4 gap-4">
         {dashboard.widgets.map((widget, idx) => {
           const data = generateTimeSeriesData(widget);
-          const series = extractSeriesFromQuery(widget.query);
+          const series = extractSeriesFromQuery(widget.query || '');
 
           return (
             <div key={idx} className="bg-white border border-gray-200 rounded-lg p-4">
