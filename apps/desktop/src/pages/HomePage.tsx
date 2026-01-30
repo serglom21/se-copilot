@@ -91,6 +91,18 @@ export default function HomePage() {
                       Open
                     </Button>
                   </Link>
+                  {project.project.githubRepoUrl && (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={e => {
+                        e.stopPropagation();
+                        window.electronAPI.openInChrome(project.project.githubRepoUrl!);
+                      }}
+                    >
+                      📂 GitHub
+                    </Button>
+                  )}
                   <Button
                     size="sm"
                     variant="danger"

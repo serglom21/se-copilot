@@ -203,10 +203,23 @@ export default function GeneratePage() {
   return (
     <div className="p-8 max-w-4xl mx-auto">
       <div className="mb-8">
-        <h1 className="text-3xl font-bold text-gray-900 mb-2">Generate Artifacts</h1>
-        <p className="text-gray-600">
-          Generate reference app, implementation guide, and dashboard JSON
-        </p>
+        <div className="flex items-start justify-between">
+          <div className="flex-1">
+            <h1 className="text-3xl font-bold text-gray-900 mb-2">Generate Artifacts</h1>
+            <p className="text-gray-600">
+              Generate reference app, implementation guide, and dashboard JSON
+            </p>
+          </div>
+          {currentProject.project.githubRepoUrl && (
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => window.electronAPI.openInChrome(currentProject.project.githubRepoUrl!)}
+            >
+              📂 View GitHub Repo
+            </Button>
+          )}
+        </div>
       </div>
 
       {/* Summary */}

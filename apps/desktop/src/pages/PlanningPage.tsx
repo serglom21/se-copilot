@@ -237,6 +237,14 @@ export default function PlanningPage() {
                 ✨ Added {newSpansAdded.length} new span(s) from chat!
               </div>
             )}
+            {currentProject.project.githubRepoUrl && (
+              <button
+                onClick={() => window.electronAPI.openInChrome(currentProject.project.githubRepoUrl!)}
+                className="text-purple-600 hover:underline text-xs mt-1 inline-block cursor-pointer bg-transparent border-none p-0"
+              >
+                📂 View on GitHub →
+              </button>
+            )}
           </div>
           <div className="flex gap-2">
             <Button size="sm" onClick={handleAddSpan}>

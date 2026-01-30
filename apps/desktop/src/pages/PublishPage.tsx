@@ -124,25 +124,38 @@ export default function PublishPage() {
   return (
     <div className="p-8 max-w-3xl mx-auto">
       <div className="mb-8">
-        <h1 className="text-3xl font-bold text-gray-900 mb-2">
-          {hasExistingRepo ? 'Push Updates to GitHub' : 'Publish to GitHub'}
-        </h1>
-        <p className="text-gray-600">
-          {hasExistingRepo
-            ? 'Push your latest changes to the existing GitHub repository'
-            : 'Push your generated reference app to a new GitHub repository'}
-        </p>
-        {hasExistingRepo && currentProject?.project.githubRepoUrl && (
-          <button
-            onClick={(e) => {
-              e.preventDefault();
-              window.electronAPI.openInChrome(currentProject.project.githubRepoUrl!);
-            }}
-            className="text-purple-600 hover:underline text-sm mt-1 inline-block cursor-pointer bg-transparent border-none p-0"
-          >
-            Current repo: {currentProject.project.githubRepoName} →
-          </button>
-        )}
+        <div className="flex items-start justify-between">
+          <div className="flex-1">
+            <h1 className="text-3xl font-bold text-gray-900 mb-2">
+              {hasExistingRepo ? 'Push Updates to GitHub' : 'Publish to GitHub'}
+            </h1>
+            <p className="text-gray-600">
+              {hasExistingRepo
+                ? 'Push your latest changes to the existing GitHub repository'
+                : 'Push your generated reference app to a new GitHub repository'}
+            </p>
+            {hasExistingRepo && currentProject?.project.githubRepoUrl && (
+              <button
+                onClick={(e) => {
+                  e.preventDefault();
+                  window.electronAPI.openInChrome(currentProject.project.githubRepoUrl!);
+                }}
+                className="text-purple-600 hover:underline text-sm mt-1 inline-block cursor-pointer bg-transparent border-none p-0"
+              >
+                Current repo: {currentProject.project.githubRepoName} →
+              </button>
+            )}
+          </div>
+          {hasExistingRepo && currentProject?.project.githubRepoUrl && (
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => window.electronAPI.openInChrome(currentProject.project.githubRepoUrl!)}
+            >
+              📂 View Repo
+            </Button>
+          )}
+        </div>
       </div>
 
       {/* GitHub Status */}
