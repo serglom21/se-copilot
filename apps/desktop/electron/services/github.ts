@@ -190,8 +190,9 @@ export class GitHubService {
           const commitMessage = `Update: ${new Date().toISOString().split('T')[0]} - Regenerated with latest changes`;
           await git.commit(commitMessage);
 
-          // Push updates
-          await git.push('origin', 'main');
+          // Push updates using authenticated URL
+          const authUrl = `https://${settings.github.accessToken}@github.com/${settings.github.username}/${repoName}.git`;
+          await git.push(authUrl, 'main:main');
           console.log('✓ Changes pushed to existing repo');
         } else {
           console.log('No changes to push');
