@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useProjectStore } from '../store/project-store';
 import Button from '../components/Button';
+import DashboardPreview from '../components/DashboardPreview';
 
 export default function GeneratePage() {
   const { projectId } = useParams<{ projectId: string }>();
@@ -321,6 +322,24 @@ export default function GeneratePage() {
           onGenerate={handleGenerateDataScript}
         />
       </div>
+
+      {/* Dashboard Preview */}
+      {status.dashboard.generated && status.dashboard.path && (
+        <div className="bg-gradient-to-br from-purple-50 to-blue-50 rounded-lg border-2 border-purple-200 p-6 mb-6">
+          <div className="mb-4 flex items-start justify-between">
+            <div>
+              <h3 className="text-xl font-semibold text-gray-900 flex items-center gap-2">
+                <span>📊</span>
+                Dashboard Preview
+              </h3>
+              <p className="text-sm text-gray-600 mt-1">
+                Interactive preview with sample data
+              </p>
+            </div>
+          </div>
+          <DashboardPreview dashboardPath={status.dashboard.path} />
+        </div>
+      )}
 
       {/* Actions */}
       <div className="flex gap-4">

@@ -202,6 +202,11 @@ function setupIpcHandlers() {
     return storage.getOutputPath(projectId);
   });
 
+  ipcMain.handle('fs:read-file', async (_, filePath: string) => {
+    const fs = await import('fs');
+    return fs.readFileSync(filePath, 'utf-8');
+  });
+
   // Deployment
   ipcMain.handle('deploy:start', async (event, projectId: string) => {
     return deploymentService.deployApp(

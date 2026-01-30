@@ -36,6 +36,7 @@ export interface IElectronAPI {
 
   // File system
   getOutputPath: (projectId: string) => Promise<string>;
+  readFile: (filePath: string) => Promise<string>;
 
   // Data generation
   runDataGenerator: (projectId: string, config: any) => Promise<{ success: boolean; error?: string }>;
@@ -110,6 +111,7 @@ const electronAPI: IElectronAPI = {
 
   // File system
   getOutputPath: (projectId) => ipcRenderer.invoke('fs:get-output-path', projectId),
+  readFile: (filePath) => ipcRenderer.invoke('fs:read-file', filePath),
 
   // Data generation
   runDataGenerator: (projectId, config) => ipcRenderer.invoke('data:run', projectId, config),
