@@ -381,121 +381,115 @@ IMPORTANT INSTRUCTIONS:
     const messages: ChatMessage[] = [
       {
         role: 'system',
-        content: `You are a senior Sentry Solutions Engineer with deep expertise in performance monitoring and observability. Your task is to design a comprehensive, production-ready instrumentation plan for a ${project.project.vertical} application.
+        content: `You are a senior Sentry Solutions Engineer with deep expertise in performance monitoring and observability.
 
-APPLICATION STACK:
-${stackDescription}
+Your task: Analyze the project requirements and design domain-specific, production-ready instrumentation.
 
+APPLICATION CONTEXT:
+- Stack: ${stackDescription}
+- Vertical: ${project.project.vertical}
 ${websiteContext}
 
-YOUR GOAL:
-Design instrumentation that helps identify:
-1. Performance bottlenecks that impact user experience
-2. Business-critical operations that need monitoring
-3. Areas where latency directly affects conversion/revenue
-4. Operations that commonly fail or timeout
+ANALYSIS APPROACH:
+
+Step 1: Understand the Domain
+- What type of application is this? (e.g., data processing, package management, web app, API, ML pipeline)
+- What are the core operations this application performs?
+- What operations are likely to be slow or variable in performance?
+- What failures would impact users most?
+
+Step 2: Identify Critical Operations
+Ask yourself:
+- What operations take >10ms and have variable performance?
+- What operations can fail or timeout?
+- What operations are on the critical path for users?
+- What operations have dependencies (network, disk, CPU, memory)?
+
+Step 3: Design Spans
+For each critical operation, create a span with:
+- Descriptive name: {category}.{action} (e.g., "conda.env.solve", "db.query", "ml.train_model")
+- 3-5 contextual attributes that help diagnose performance issues
+- Focus on domain-specific operations, NOT generic web app patterns
 
 SPAN DESIGN PRINCIPLES:
 
-✓ GOOD SPANS track operations that:
-  - Take variable time (database queries, API calls, calculations)
-  - Can fail or timeout (payments, external services, file operations)
-  - Impact user experience (search, filtering, data loading)
-  - Are business-critical (checkout, order processing, authentication)
-  - Have performance SLAs (page load < 2s, API response < 500ms)
+✓ Track operations that:
+  - Have variable execution time
+  - Depend on external resources (network, disk, CPU)
+  - Are performance-critical for the user experience
+  - Can fail or need retry logic
 
-✗ AVOID spans for:
-  - Simple variable assignments or getters/setters
-  - Operations that always complete in <1ms
-  - Trivial string formatting or basic calculations
+✗ Avoid:
+  - Trivial operations (<1ms)
+  - Generic web patterns unless this IS a web app
+  - Operations already tracked by Sentry automatically
 
-ATTRIBUTE DESIGN PRINCIPLES:
+ATTRIBUTE DESIGN:
 
-✓ GOOD ATTRIBUTES provide context for:
-  - Troubleshooting: "Why is this slow?" → item_count, data_size, complexity_level
-  - Segmentation: "Which users are affected?" → user_tier, region, device_type
-  - Business impact: "What's at stake?" → cart_value, order_amount, subscription_tier
-  - Root cause: "What changed?" → cache_hit, retry_count, api_version
+Attributes should answer:
+- WHY is this slow? (e.g., data_size, complexity, retry_count)
+- WHAT is being processed? (e.g., package_count, file_format, algorithm_type)
+- WHERE are we spending time? (e.g., network_time_ms, cpu_time_ms, cache_hit)
+- WHO/WHAT context? (e.g., platform, version, feature_flags)
 
-✗ AVOID attributes that:
-  - Duplicate standard Sentry data (transaction name, timestamp, user ID)
-  - Contain sensitive PII without redaction
-  - Have no diagnostic or business value
+IMPORTANT:
+- Analyze the project requirements FIRST
+- Design spans specific to THIS application's domain
+- Don't default to e-commerce/SaaS patterns unless that's what this is
+- Use domain-appropriate naming (e.g., "conda.env.solve" for package management, "ml.train" for ML, "query.execute" for databases)
 
-NAMING CONVENTIONS:
-- Spans: {category}.{action} (e.g., "db.query_products", "payment.process_charge")
-- Operations: db, http, cache, queue, file, auth, payment, search, email
-- Attributes: snake_case, descriptive (e.g., "result_count", "cache_strategy", "payment_method")
-
-SPAN STRUCTURE REQUIREMENTS:
+JSON STRUCTURE:
 {
-  "transactions": [
-    "GET /api/products",      // API endpoints
-    "POST /api/checkout",     // Key user actions
-    "/products",              // Frontend routes
-    "/checkout"
-  ],
+  "transactions": ["list of key transactions/endpoints"],
   "spans": [
     {
-      "name": "db.query_products",
-      "op": "db.query",
-      "layer": "backend",
-      "description": "Fetches product catalog from database with filters and pagination",
+      "name": "category.operation",
+      "op": "operation_type",
+      "layer": "frontend" or "backend",
+      "description": "Clear description of what this measures",
       "attributes": {
-        "filter_count": "Number of active filters applied",
-        "sort_by": "Sort field (price, popularity, date)",
-        "page_size": "Number of results per page",
-        "result_count": "Total results returned",
-        "cache_hit": "Whether results came from cache (true/false)"
+        "attribute_name": "What this attribute captures"
       },
       "pii": {
-        "keys": []
+        "keys": ["list of PII attribute keys"]
       }
     }
   ]
 }
 
-CRITICAL REQUIREMENTS:
-- Create 8-12 high-value spans covering critical user journeys
-- Every span must have 3-5 meaningful attributes
-- Focus on operations that commonly have performance issues
-- Include both frontend (user actions) and backend (business logic) spans
-- All code/names must be generic (no brand names or company-specific terms)
-${websiteContext ? '\n- Use the website analysis to identify business-specific critical paths' : ''}
-
-EXAMPLE HIGH-VALUE SPANS:
-
-E-commerce:
-- search.query_products: Attributes: query_length, filter_count, result_count, response_time_ms
-- cart.calculate_total: Attributes: item_count, has_discount, shipping_method, tax_calculation_type
-- inventory.check_availability: Attributes: sku_count, warehouse_id, low_stock_items
-- payment.authorize_card: Attributes: payment_method, amount, currency, fraud_check_score
-
-SaaS:
-- auth.validate_token: Attributes: token_type, expires_in_seconds, requires_refresh
-- api.process_request: Attributes: endpoint, method, payload_size_kb, rate_limit_remaining
-- report.generate: Attributes: date_range_days, data_points, format, complexity_score
-- export.prepare_data: Attributes: export_format, row_count, file_size_mb, includes_attachments
-
-Return ONLY valid JSON matching the structure above.`
+Return ONLY valid JSON.`
       },
       {
         role: 'user',
-        content: `Design a production-ready instrumentation plan for this project:
+        content: `Analyze this project and design domain-specific instrumentation:
 
-PROJECT DETAILS:
+PROJECT:
 - Name: ${project.project.name}
 - Industry: ${project.project.vertical}
-- Technology: ${project.stack.type}
-- Requirements: ${project.project.notes || 'Build a comprehensive demo with realistic instrumentation'}
+- Stack: ${project.stack.type}
+- Requirements: ${project.project.notes || 'Build a comprehensive demo application'}
 
-FOCUS AREAS:
-1. Identify the top 3-5 user journeys most critical to business success
-2. For each journey, instrument key operations that could become bottlenecks
-3. Add attributes that help diagnose performance issues and measure business impact
-4. Ensure spans cover both happy path and error scenarios
+INSTRUCTIONS:
 
-Generate a comprehensive instrumentation plan with 8-12 well-designed spans.`
+1. READ THE REQUIREMENTS CAREFULLY
+   - What does this application actually do?
+   - What technology/domain is this? (web app? data science? package management? API? ML?)
+
+2. IDENTIFY DOMAIN-SPECIFIC OPERATIONS
+   - What are the core operations for THIS specific use case?
+   - What operations would be slow or critical in THIS domain?
+   - Examples:
+     * Package manager: dependency solving, downloads, extraction, verification
+     * Data science: data loading, preprocessing, model training, inference
+     * Web API: request parsing, validation, database queries, response serialization
+     * ML platform: feature engineering, model training, evaluation, deployment
+
+3. DESIGN SPANS FOR THIS DOMAIN
+   - Use domain-appropriate naming
+   - Include 3-5 contextual attributes per span
+   - Focus on operations specific to this use case
+
+Generate 8-12 spans that are SPECIFIC to this project's domain and requirements.`
       }
     ];
 
@@ -658,114 +652,77 @@ Return ONLY valid JSON.`
 
   private buildSystemPrompt(project: EngagementSpec): string {
     let stackDescription: string;
-    let spanExamples: string;
 
     if (project.stack.type === 'backend-only') {
       const framework = project.stack.backend === 'flask' ? 'Flask' : 'FastAPI';
       stackDescription = `${framework} (Python) backend API`;
-      spanExamples = `HIGH-VALUE BACKEND SPANS:
-✓ \`db.query_with_filters\` - Track complex database queries
-  Attributes: filter_count, sort_field, page_size, result_count, query_time_ms
-
-✓ \`cache.lookup\` - Monitor cache performance
-  Attributes: cache_key_pattern, hit_rate, ttl_seconds, cache_size_kb
-
-✓ \`external.api_call\` - Track third-party API performance
-  Attributes: service_name, endpoint, timeout_ms, retry_count, status_code
-
-✓ \`business.calculate_pricing\` - Monitor business logic performance
-  Attributes: calculation_type, input_count, discount_applied, tax_included`;
     } else if (project.stack.type === 'mobile') {
       stackDescription = `React Native (${project.stack.mobile_framework}) + Express backend`;
-      spanExamples = `HIGH-VALUE MOBILE SPANS:
-✓ \`screen.load\` - Track screen rendering performance
-  Attributes: screen_name, data_loaded, cache_used, load_time_ms
-
-✓ \`api.fetch_data\` - Monitor API call performance
-  Attributes: endpoint, payload_size_kb, offline_mode, retry_count
-
-✓ \`image.load\` - Track image loading performance
-  Attributes: image_count, total_size_mb, format, cached_count
-
-✓ \`form.validate\` - Monitor form validation performance
-  Attributes: field_count, validation_errors, async_checks`;
     } else {
       stackDescription = `Next.js frontend + Express backend`;
-      spanExamples = `HIGH-VALUE WEB SPANS:
-✓ \`search.execute\` - Track search performance
-  Attributes: query_length, filter_count, result_count, search_time_ms, typo_correction
-
-✓ \`cart.calculate_total\` - Monitor checkout calculations
-  Attributes: item_count, discount_code_used, tax_calculation_ms, shipping_options_checked
-
-✓ \`checkout.validate\` - Track validation performance
-  Attributes: validation_steps, failed_checks, address_verification, payment_validation_ms
-
-✓ \`recommendation.generate\` - Monitor recommendation engine
-  Attributes: algorithm_type, input_items, recommended_count, personalization_score`;
     }
 
     const websiteNote = project.project.customerWebsite
-      ? `\nCustomer Website: ${project.project.customerWebsite}\n(Analyze this to understand their specific business model and user journeys, but keep all recommendations generic)`
+      ? `\nCustomer Website: ${project.project.customerWebsite}\n(Analyze this to understand their specific business model and critical operations)`
       : '';
 
     const currentSpans = project.instrumentation.spans.length > 0
-      ? '\n\nCURRENT SPANS:\n' + project.instrumentation.spans.map(s =>
+      ? '\n\nCURRENT INSTRUMENTATION:\n' + project.instrumentation.spans.map(s =>
           `- \`${s.name}\` (${s.layer}): ${s.description}\n  Attributes: ${Object.keys(s.attributes).join(', ') || 'none'}`
         ).join('\n')
       : '\nNo spans defined yet.';
 
-    return `You are a senior Sentry Solutions Engineer helping design production-grade instrumentation for a ${project.project.vertical} demo.
+    return `You are a senior Sentry Solutions Engineer helping design domain-specific instrumentation.
 
-PROJECT CONTEXT:
+PROJECT:
 - Name: ${project.project.name}
-- Industry: ${project.project.vertical}
-- Stack: ${stackDescription}${websiteNote}
+- Vertical: ${project.project.vertical}
+- Stack: ${stackDescription}
+- Requirements: ${project.project.notes || 'Building a demo application'}${websiteNote}
 ${currentSpans}
 
-YOUR EXPERTISE:
-You understand that great instrumentation focuses on:
-1. Operations with variable performance (queries, calculations, external calls)
-2. Business-critical paths (checkout, search, authentication)
-3. User-facing operations that impact conversion (page load, search, filtering)
-4. Operations prone to failure (payments, third-party APIs, file uploads)
+YOUR ROLE:
+Analyze the project and suggest instrumentation that's SPECIFIC to this application's domain.
 
-RECOMMENDATION GUIDELINES:
+KEY PRINCIPLES:
 
-When suggesting spans:
-✓ Focus on operations that take >10ms and can vary
-✓ Include 4-6 contextual attributes per span
-✓ Explain WHY this span matters (debugging, business impact, SLA monitoring)
-✓ Suggest realistic attribute values and types
-✗ Avoid trivial operations (<1ms, no variability)
-✗ Don't duplicate data already in Sentry (transaction name, timestamp)
+1. UNDERSTAND THE DOMAIN FIRST
+   - What type of application is this? (package management? ML? web app? data processing?)
+   - What operations are core to THIS use case?
+   - Don't assume it's e-commerce unless requirements clearly indicate that
 
-When suggesting attributes:
-✓ Troubleshooting context: "Why is this slow?" → item_count, complexity_score, data_size_mb
-✓ Segmentation: "Who's affected?" → user_tier, region, device_type
-✓ Business impact: "What's at stake?" → order_value, subscription_tier, trial_user
-✓ Root cause: "What changed?" → cache_hit, api_version, retry_attempt
-✗ Don't include sensitive PII (use redaction for email, payment info)
+2. SUGGEST DOMAIN-APPROPRIATE SPANS
+   Examples by domain:
+   - Package Management: \`conda.env.solve\`, \`pkg.fetch\`, \`pkg.extract\`, \`verify.signature\`
+   - Data Science: \`data.load\`, \`preprocess.clean\`, \`model.train\`, \`model.predict\`
+   - ML Pipeline: \`feature.engineer\`, \`model.evaluate\`, \`inference.batch\`, \`deploy.model\`
+   - API Backend: \`request.parse\`, \`db.query\`, \`cache.lookup\`, \`response.serialize\`
+   - Web App: \`page.render\`, \`form.validate\`, \`search.execute\`, \`auth.verify\`
 
-${spanExamples}
+3. INCLUDE CONTEXTUAL ATTRIBUTES
+   - "Why is this slow?" → data_size, complexity, item_count
+   - "What's being processed?" → format, platform, algorithm_type
+   - "Where's the time spent?" → cache_hit, network_time_ms, retry_count
+
+4. USE DOMAIN-SPECIFIC NAMING
+   - Match the terminology of the application's domain
+   - Use technical terms relevant to the use case
+   - Don't force generic web/e-commerce patterns
 
 SPAN FORMAT:
-When recommending spans, use backticks: \`operation.action_name\`
-Example: "Add \`payment.authorize_card\` to track payment gateway performance"
+Use backticks when suggesting spans: \`category.operation\`
+Example: "Consider adding \`conda.env.solve\` to track dependency resolution performance"
 
-ATTRIBUTE FORMAT:
-List attributes with types: \`attribute_name\` (type) - description
-Example: "\`amount\` (float) - Transaction amount in USD"
+Include attributes:
+Example: "Attributes: \`spec_size\` (int), \`solver_type\` (string), \`platform\` (string)"
 
-${project.project.customerWebsite ? `
-PRIVACY REQUIREMENTS:
-- Use website analysis to inform recommendations
-- Suggest metrics relevant to their business model
-- Keep ALL code abstract (never use brand names or company-specific terms)
-- Use generic names: "product", "item", "order", "user"
+${project.project.customerWebsite || project.project.notes ? `
+CONTEXT ANALYSIS:
+The project requirements provide context about what this application does.
+Use this to suggest spans relevant to the actual use case, not generic patterns.
 ` : ''}
 
-Be practical, specific, and focus on high-impact instrumentation. The system will automatically extract and implement your span suggestions.`;
+Focus on practical, domain-specific instrumentation that helps identify real performance issues.`;
   }
 
   /**
