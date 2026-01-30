@@ -1,10 +1,12 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useProjectStore } from '../store/project-store';
 import Button from '../components/Button';
+import DashboardPreview from '../components/DashboardPreview';
 
 export default function HomePage() {
   const { projects, loadProjects, setCurrentProject, deleteProject } = useProjectStore();
+  const [dashboardPreview, setDashboardPreview] = useState<{ projectId: string; projectName: string; dashboardPath: string } | null>(null);
 
   useEffect(() => {
     loadProjects();
@@ -19,6 +21,17 @@ export default function HomePage() {
     if (confirm('Are you sure you want to delete this project?')) {
       await deleteProject(projectId);
     }
+  };
+
+  const handleShowDashboard = async (project: any, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const outputPath = await window.electronAPI.getOutputPath(project.id);
+    const dashboardPath = `${outputPath}/sentry-dashboard.json`;
+    setDashboardPreview({
+      projectId: project.id,
+      projectName: project.project.name,
+      dashboardPath
+    });
   };
 
   return (
@@ -103,6 +116,15 @@ export default function HomePage() {
                       📂 GitHub
                     </Button>
                   )}
+                  {(project.status === 'generated' || project.status === 'published') && (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={e => handleShowDashboard(project, e)}
+                    >
+                      📊 Dashboard
+                    </Button>
+                  )}
                   <Button
                     size="sm"
                     variant="danger"
@@ -114,6 +136,29 @@ export default function HomePage() {
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Dashboard Preview Modal */}
+      {dashboardPreview && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" onClick={() => setDashboardPreview(null)}>
+          <div className="bg-white rounded-lg max-w-7xl w-full max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <div className="sticky top-0 bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
+              <div>
+                <h2 className="text-2xl font-bold text-gray-900">{dashboardPreview.projectName}</h2>
+                <p className="text-sm text-gray-600">Dashboard Preview</p>
+              </div>
+              <button
+                onClick={() => setDashboardPreview(null)}
+                className="text-gray-400 hover:text-gray-600 text-2xl font-bold w-8 h-8 flex items-center justify-center"
+              >
+                ×
+              </button>
+            </div>
+            <div className="p-6">
+              <DashboardPreview dashboardPath={dashboardPreview.dashboardPath} />
+            </div>
+          </div>
         </div>
       )}
     </div>
