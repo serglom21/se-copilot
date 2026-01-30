@@ -381,57 +381,121 @@ IMPORTANT INSTRUCTIONS:
     const messages: ChatMessage[] = [
       {
         role: 'system',
-        content: `You are an expert in Sentry instrumentation and observability. Your task is to generate a comprehensive instrumentation plan for a ${project.project.vertical} application.
+        content: `You are a senior Sentry Solutions Engineer with deep expertise in performance monitoring and observability. Your task is to design a comprehensive, production-ready instrumentation plan for a ${project.project.vertical} application.
 
-The application uses:
+APPLICATION STACK:
 ${stackDescription}
 
 ${websiteContext}
 
-CRITICAL REQUIREMENTS:
-- If a customer website is provided, use it to understand the business model and user flows
-- Recommend performance metrics specific to their type of application
-- All generated code MUST be abstract and generic
-- NEVER reference company names, brand names, or specific products
-- Use placeholder names like "product", "item", "service", "user"
+YOUR GOAL:
+Design instrumentation that helps identify:
+1. Performance bottlenecks that impact user experience
+2. Business-critical operations that need monitoring
+3. Areas where latency directly affects conversion/revenue
+4. Operations that commonly fail or timeout
 
-Generate a JSON response with the following structure:
+SPAN DESIGN PRINCIPLES:
+
+✓ GOOD SPANS track operations that:
+  - Take variable time (database queries, API calls, calculations)
+  - Can fail or timeout (payments, external services, file operations)
+  - Impact user experience (search, filtering, data loading)
+  - Are business-critical (checkout, order processing, authentication)
+  - Have performance SLAs (page load < 2s, API response < 500ms)
+
+✗ AVOID spans for:
+  - Simple variable assignments or getters/setters
+  - Operations that always complete in <1ms
+  - Trivial string formatting or basic calculations
+
+ATTRIBUTE DESIGN PRINCIPLES:
+
+✓ GOOD ATTRIBUTES provide context for:
+  - Troubleshooting: "Why is this slow?" → item_count, data_size, complexity_level
+  - Segmentation: "Which users are affected?" → user_tier, region, device_type
+  - Business impact: "What's at stake?" → cart_value, order_amount, subscription_tier
+  - Root cause: "What changed?" → cache_hit, retry_count, api_version
+
+✗ AVOID attributes that:
+  - Duplicate standard Sentry data (transaction name, timestamp, user ID)
+  - Contain sensitive PII without redaction
+  - Have no diagnostic or business value
+
+NAMING CONVENTIONS:
+- Spans: {category}.{action} (e.g., "db.query_products", "payment.process_charge")
+- Operations: db, http, cache, queue, file, auth, payment, search, email
+- Attributes: snake_case, descriptive (e.g., "result_count", "cache_strategy", "payment_method")
+
+SPAN STRUCTURE REQUIREMENTS:
 {
-  "transactions": ["list of transaction names"],
+  "transactions": [
+    "GET /api/products",      // API endpoints
+    "POST /api/checkout",     // Key user actions
+    "/products",              // Frontend routes
+    "/checkout"
+  ],
   "spans": [
     {
-      "name": "span.operation_name",
-      "op": "operation_type",
-      "layer": "frontend" or "backend",
-      "description": "what this span measures",
+      "name": "db.query_products",
+      "op": "db.query",
+      "layer": "backend",
+      "description": "Fetches product catalog from database with filters and pagination",
       "attributes": {
-        "attribute_key": "description of what this attribute captures"
+        "filter_count": "Number of active filters applied",
+        "sort_by": "Sort field (price, popularity, date)",
+        "page_size": "Number of results per page",
+        "result_count": "Total results returned",
+        "cache_hit": "Whether results came from cache (true/false)"
       },
       "pii": {
-        "keys": ["list of attribute keys that contain PII"]
+        "keys": []
       }
     }
   ]
 }
 
-${exampleSpans}
+CRITICAL REQUIREMENTS:
+- Create 8-12 high-value spans covering critical user journeys
+- Every span must have 3-5 meaningful attributes
+- Focus on operations that commonly have performance issues
+- Include both frontend (user actions) and backend (business logic) spans
+- All code/names must be generic (no brand names or company-specific terms)
+${websiteContext ? '\n- Use the website analysis to identify business-specific critical paths' : ''}
 
-For each critical user journey:
-1. Define transaction names (e.g., "GET /api/products", "POST /api/checkout")
-2. Define custom spans for key operations
-3. Add meaningful attributes (e.g., cart_value, item_count, payment_method)
-4. Mark PII attributes (e.g., email, credit_card, address)
+EXAMPLE HIGH-VALUE SPANS:
 
-Be specific and comprehensive. Return ONLY valid JSON.`
+E-commerce:
+- search.query_products: Attributes: query_length, filter_count, result_count, response_time_ms
+- cart.calculate_total: Attributes: item_count, has_discount, shipping_method, tax_calculation_type
+- inventory.check_availability: Attributes: sku_count, warehouse_id, low_stock_items
+- payment.authorize_card: Attributes: payment_method, amount, currency, fraud_check_score
+
+SaaS:
+- auth.validate_token: Attributes: token_type, expires_in_seconds, requires_refresh
+- api.process_request: Attributes: endpoint, method, payload_size_kb, rate_limit_remaining
+- report.generate: Attributes: date_range_days, data_points, format, complexity_score
+- export.prepare_data: Attributes: export_format, row_count, file_size_mb, includes_attachments
+
+Return ONLY valid JSON matching the structure above.`
       },
       {
         role: 'user',
-        content: `Project: ${project.project.name}
-Vertical: ${project.project.vertical}
-Stack Type: ${project.stack.type}
-Notes: ${project.project.notes || 'None'}
+        content: `Design a production-ready instrumentation plan for this project:
 
-Generate an instrumentation plan for this project.`
+PROJECT DETAILS:
+- Name: ${project.project.name}
+- Industry: ${project.project.vertical}
+- Technology: ${project.stack.type}
+- Requirements: ${project.project.notes || 'Build a comprehensive demo with realistic instrumentation'}
+
+FOCUS AREAS:
+1. Identify the top 3-5 user journeys most critical to business success
+2. For each journey, instrument key operations that could become bottlenecks
+3. Add attributes that help diagnose performance issues and measure business impact
+4. Ensure spans cover both happy path and error scenarios
+
+Generate a comprehensive instrumentation plan with 8-12 well-designed spans.`
       }
     ];
 
@@ -594,60 +658,114 @@ Return ONLY valid JSON.`
 
   private buildSystemPrompt(project: EngagementSpec): string {
     let stackDescription: string;
-    let spanSuggestions: string;
+    let spanExamples: string;
 
     if (project.stack.type === 'backend-only') {
       const framework = project.stack.backend === 'flask' ? 'Flask' : 'FastAPI';
       stackDescription = `${framework} (Python) backend API`;
-      spanSuggestions = `- Backend API spans: \`db.query\`, \`cache.get\`, \`api.endpoint\`, \`external.http_call\`
-- Business logic spans: \`payment.process\`, \`order.validate\`, \`email.send\`
-- Data processing: \`data.transform\`, \`file.process\`, \`batch.job\``;
+      spanExamples = `HIGH-VALUE BACKEND SPANS:
+✓ \`db.query_with_filters\` - Track complex database queries
+  Attributes: filter_count, sort_field, page_size, result_count, query_time_ms
+
+✓ \`cache.lookup\` - Monitor cache performance
+  Attributes: cache_key_pattern, hit_rate, ttl_seconds, cache_size_kb
+
+✓ \`external.api_call\` - Track third-party API performance
+  Attributes: service_name, endpoint, timeout_ms, retry_count, status_code
+
+✓ \`business.calculate_pricing\` - Monitor business logic performance
+  Attributes: calculation_type, input_count, discount_applied, tax_included`;
     } else if (project.stack.type === 'mobile') {
       stackDescription = `React Native (${project.stack.mobile_framework}) + Express backend`;
-      spanSuggestions = `- Mobile-specific spans: \`navigation.screen_load\`, \`ui.button_press\`, \`sensor.camera\`, \`sensor.location\`
-- API calls: \`api.fetch\`, \`api.post\``;
+      spanExamples = `HIGH-VALUE MOBILE SPANS:
+✓ \`screen.load\` - Track screen rendering performance
+  Attributes: screen_name, data_loaded, cache_used, load_time_ms
+
+✓ \`api.fetch_data\` - Monitor API call performance
+  Attributes: endpoint, payload_size_kb, offline_mode, retry_count
+
+✓ \`image.load\` - Track image loading performance
+  Attributes: image_count, total_size_mb, format, cached_count
+
+✓ \`form.validate\` - Monitor form validation performance
+  Attributes: field_count, validation_errors, async_checks`;
     } else {
       stackDescription = `Next.js frontend + Express backend`;
-      spanSuggestions = `- Web spans: \`checkout.validate\`, \`payment.process\`, \`cart.addProduct\``;
+      spanExamples = `HIGH-VALUE WEB SPANS:
+✓ \`search.execute\` - Track search performance
+  Attributes: query_length, filter_count, result_count, search_time_ms, typo_correction
+
+✓ \`cart.calculate_total\` - Monitor checkout calculations
+  Attributes: item_count, discount_code_used, tax_calculation_ms, shipping_options_checked
+
+✓ \`checkout.validate\` - Track validation performance
+  Attributes: validation_steps, failed_checks, address_verification, payment_validation_ms
+
+✓ \`recommendation.generate\` - Monitor recommendation engine
+  Attributes: algorithm_type, input_items, recommended_count, personalization_score`;
     }
 
     const websiteNote = project.project.customerWebsite
-      ? `\nCustomer Website: ${project.project.customerWebsite}\n(Reference this to provide context-aware recommendations, but keep all code abstract)`
+      ? `\nCustomer Website: ${project.project.customerWebsite}\n(Analyze this to understand their specific business model and user journeys, but keep all recommendations generic)`
       : '';
 
-    return `You are an expert Sentry Sales Engineer helping to plan instrumentation for a customer demo.
+    const currentSpans = project.instrumentation.spans.length > 0
+      ? '\n\nCURRENT SPANS:\n' + project.instrumentation.spans.map(s =>
+          `- \`${s.name}\` (${s.layer}): ${s.description}\n  Attributes: ${Object.keys(s.attributes).join(', ') || 'none'}`
+        ).join('\n')
+      : '\nNo spans defined yet.';
 
-Project: ${project.project.name}
-Vertical: ${project.project.vertical}
-Stack: ${stackDescription}${websiteNote}
+    return `You are a senior Sentry Solutions Engineer helping design production-grade instrumentation for a ${project.project.vertical} demo.
 
-Current instrumentation plan:
-- Transactions: ${project.instrumentation.transactions.join(', ') || 'None yet'}
-- Custom spans: ${project.instrumentation.spans.length} defined
+PROJECT CONTEXT:
+- Name: ${project.project.name}
+- Industry: ${project.project.vertical}
+- Stack: ${stackDescription}${websiteNote}
+${currentSpans}
+
+YOUR EXPERTISE:
+You understand that great instrumentation focuses on:
+1. Operations with variable performance (queries, calculations, external calls)
+2. Business-critical paths (checkout, search, authentication)
+3. User-facing operations that impact conversion (page load, search, filtering)
+4. Operations prone to failure (payments, third-party APIs, file uploads)
+
+RECOMMENDATION GUIDELINES:
+
+When suggesting spans:
+✓ Focus on operations that take >10ms and can vary
+✓ Include 4-6 contextual attributes per span
+✓ Explain WHY this span matters (debugging, business impact, SLA monitoring)
+✓ Suggest realistic attribute values and types
+✗ Avoid trivial operations (<1ms, no variability)
+✗ Don't duplicate data already in Sentry (transaction name, timestamp)
+
+When suggesting attributes:
+✓ Troubleshooting context: "Why is this slow?" → item_count, complexity_score, data_size_mb
+✓ Segmentation: "Who's affected?" → user_tier, region, device_type
+✓ Business impact: "What's at stake?" → order_value, subscription_tier, trial_user
+✓ Root cause: "What changed?" → cache_hit, api_version, retry_attempt
+✗ Don't include sensitive PII (use redaction for email, payment info)
+
+${spanExamples}
+
+SPAN FORMAT:
+When recommending spans, use backticks: \`operation.action_name\`
+Example: "Add \`payment.authorize_card\` to track payment gateway performance"
+
+ATTRIBUTE FORMAT:
+List attributes with types: \`attribute_name\` (type) - description
+Example: "\`amount\` (float) - Transaction amount in USD"
 
 ${project.project.customerWebsite ? `
-IMPORTANT PRIVACY GUIDELINES:
-- Use the customer website to understand their business model and user journeys
-- Provide specific, relevant performance metrics recommendations
-- NEVER include company names or brand names in code examples
-- Keep all code abstract (use "product", "item", "user", not specific brand names)
+PRIVACY REQUIREMENTS:
+- Use website analysis to inform recommendations
+- Suggest metrics relevant to their business model
+- Keep ALL code abstract (never use brand names or company-specific terms)
+- Use generic names: "product", "item", "order", "user"
 ` : ''}
 
-Your role is to:
-1. Answer questions about Sentry instrumentation best practices
-2. Help refine the instrumentation plan
-3. Suggest additional spans or attributes based on the use case
-4. Provide guidance on what data to capture
-
-IMPORTANT: When suggesting custom spans, use this format:
-- Use backticks around span names: \`operation.action\`
-${spanSuggestions}
-- Mention if it's for frontend or backend
-- Suggest relevant attributes like \`cart_value\`, \`item_count\`, \`payment_method\`
-
-The system will automatically extract and add these spans to the instrumentation spec!
-
-Be concise and practical. Focus on delivering value for a demo.`;
+Be practical, specific, and focus on high-impact instrumentation. The system will automatically extract and implement your span suggestions.`;
   }
 
   /**
