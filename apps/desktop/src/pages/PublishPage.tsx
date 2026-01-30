@@ -18,7 +18,7 @@ export default function PublishPage() {
   });
 
   const [publishing, setPublishing] = useState(false);
-  const [publishResult, setPublishResult] = useState<{ success: boolean; repoUrl?: string } | null>(null);
+  const [publishResult, setPublishResult] = useState<{ success: boolean; repoUrl?: string; isUpdate?: boolean } | null>(null);
   const [authInProgress, setAuthInProgress] = useState(false);
 
   useEffect(() => {
@@ -41,10 +41,12 @@ export default function PublishPage() {
     if (currentProject) {
       setRepoConfig(c => ({
         ...c,
-        name: currentProject.project.slug
+        name: currentProject.project.githubRepoName || currentProject.project.slug
       }));
     }
   }, [currentProject]);
+
+  const hasExistingRepo = currentProject?.project.githubRepoUrl && currentProject?.project.githubRepoName;
 
   const checkGitHubStatus = async () => {
     const status = await window.electronAPI.getGitHubStatus();
@@ -73,13 +75,18 @@ export default function PublishPage() {
 
   const handlePublish = async () => {
     if (!currentProject) return;
-    
+
     if (!repoConfig.name.trim()) {
       alert('Please enter a repository name');
       return;
     }
 
-    if (!confirm(`Create GitHub repository "${repoConfig.name}" and push code?`)) {
+    const isUpdate = hasExistingRepo;
+    const confirmMessage = isUpdate
+      ? `Push changes to existing GitHub repository "${repoConfig.name}"?\n\nThis will commit and push your latest changes.`
+      : `Create GitHub repository "${repoConfig.name}" and push code?`;
+
+    if (!confirm(confirmMessage)) {
       return;
     }
 
@@ -92,7 +99,11 @@ export default function PublishPage() {
       );
 
       if (result.success) {
-        setPublishResult({ success: true, repoUrl: result.repoUrl });
+        setPublishResult({
+          success: true,
+          repoUrl: result.repoUrl,
+          isUpdate: result.isUpdate
+        });
       } else {
         throw new Error(result.error);
       }
@@ -110,10 +121,24 @@ export default function PublishPage() {
   return (
     <div className="p-8 max-w-3xl mx-auto">
       <div className="mb-8">
-        <h1 className="text-3xl font-bold text-gray-900 mb-2">Publish to GitHub</h1>
+        <h1 className="text-3xl font-bold text-gray-900 mb-2">
+          {hasExistingRepo ? 'Push Updates to GitHub' : 'Publish to GitHub'}
+        </h1>
         <p className="text-gray-600">
-          Push your generated reference app to a new GitHub repository
+          {hasExistingRepo
+            ? 'Push your latest changes to the existing GitHub repository'
+            : 'Push your generated reference app to a new GitHub repository'}
         </p>
+        {hasExistingRepo && currentProject?.project.githubRepoUrl && (
+          <a
+            href={currentProject.project.githubRepoUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-purple-600 hover:underline text-sm mt-1 inline-block"
+          >
+            Current repo: {currentProject.project.githubRepoName} →
+          </a>
+        )}
       </div>
 
       {/* GitHub Status */}
@@ -164,32 +189,60 @@ export default function PublishPage() {
       {/* Repository Configuration */}
       {githubStatus.authenticated && !publishResult && (
         <div className="bg-white rounded-lg border border-gray-200 p-6 mb-6">
-          <h2 className="text-xl font-semibold mb-4">Repository Configuration</h2>
-          
-          <div className="space-y-4">
-            <Input
-              label="Repository Name"
-              value={repoConfig.name}
-              onChange={e => setRepoConfig({ ...repoConfig, name: e.target.value })}
-              placeholder="my-sentry-demo"
-            />
+          <h2 className="text-xl font-semibold mb-4">
+            {hasExistingRepo ? 'Repository' : 'Repository Configuration'}
+          </h2>
 
-            <div>
-              <label className="flex items-center">
-                <input
-                  type="checkbox"
-                  checked={repoConfig.isPrivate}
-                  onChange={e => setRepoConfig({ ...repoConfig, isPrivate: e.target.checked })}
-                  className="mr-2"
+          <div className="space-y-4">
+            {hasExistingRepo ? (
+              <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
+                <div className="flex items-start gap-3">
+                  <div className="text-2xl">🔗</div>
+                  <div className="flex-1">
+                    <div className="font-medium text-purple-900 mb-1">
+                      Existing Repository: {repoConfig.name}
+                    </div>
+                    <p className="text-sm text-purple-800 mb-2">
+                      This project is already connected to a GitHub repository. Clicking "Push Update" will commit and push your latest changes.
+                    </p>
+                    <a
+                      href={currentProject?.project.githubRepoUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-sm text-purple-600 hover:underline"
+                    >
+                      View on GitHub →
+                    </a>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <>
+                <Input
+                  label="Repository Name"
+                  value={repoConfig.name}
+                  onChange={e => setRepoConfig({ ...repoConfig, name: e.target.value })}
+                  placeholder="my-sentry-demo"
                 />
-                <span className="text-sm font-medium text-gray-700">
-                  Private repository
-                </span>
-              </label>
-            </div>
+
+                <div>
+                  <label className="flex items-center">
+                    <input
+                      type="checkbox"
+                      checked={repoConfig.isPrivate}
+                      onChange={e => setRepoConfig({ ...repoConfig, isPrivate: e.target.checked })}
+                      className="mr-2"
+                    />
+                    <span className="text-sm font-medium text-gray-700">
+                      Private repository
+                    </span>
+                  </label>
+                </div>
+              </>
+            )}
 
             <div className="bg-blue-50 p-4 rounded-lg text-sm text-blue-800">
-              <strong>What will be included:</strong>
+              <strong>What will be {hasExistingRepo ? 'updated' : 'included'}:</strong>
               <ul className="list-disc list-inside mt-2 space-y-1">
                 <li>Reference application (frontend + backend)</li>
                 <li>IMPLEMENTATION_GUIDE.md</li>
@@ -205,24 +258,34 @@ export default function PublishPage() {
       {publishResult && publishResult.success && (
         <div className="bg-green-50 rounded-lg border border-green-200 p-6 mb-6">
           <div className="flex items-start gap-4">
-            <div className="text-4xl">🎉</div>
+            <div className="text-4xl">{publishResult.isUpdate ? '✅' : '🎉'}</div>
             <div className="flex-1">
               <h3 className="text-xl font-semibold text-green-900 mb-2">
-                Published Successfully!
+                {publishResult.isUpdate ? 'Updates Pushed Successfully!' : 'Published Successfully!'}
               </h3>
               <p className="text-green-800 mb-4">
-                Your reference app has been pushed to GitHub.
+                {publishResult.isUpdate
+                  ? 'Your latest changes have been committed and pushed to GitHub.'
+                  : 'Your reference app has been pushed to GitHub.'}
               </p>
-              {publishResult.repoUrl && (
-                <a
-                  href={publishResult.repoUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-block bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition-colors"
+              <div className="flex gap-3">
+                {publishResult.repoUrl && (
+                  <a
+                    href={publishResult.repoUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-block bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition-colors"
+                  >
+                    View on GitHub →
+                  </a>
+                )}
+                <Button
+                  variant="secondary"
+                  onClick={() => setPublishResult(null)}
                 >
-                  View on GitHub →
-                </a>
-              )}
+                  Push Another Update
+                </Button>
+              </div>
             </div>
           </div>
         </div>
@@ -237,7 +300,9 @@ export default function PublishPage() {
             disabled={publishing || !repoConfig.name.trim()}
             className="flex-1"
           >
-            {publishing ? '⏳ Publishing...' : '🚀 Publish to GitHub'}
+            {publishing
+              ? (hasExistingRepo ? '⏳ Pushing Update...' : '⏳ Publishing...')
+              : (hasExistingRepo ? '🔄 Push Update to GitHub' : '🚀 Publish to GitHub')}
           </Button>
         </div>
       )}

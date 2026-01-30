@@ -15,6 +15,9 @@ export default function GeneratePage() {
     dataScript: { generated: false, loading: false, path: '' }
   });
 
+  const [pushingDashboard, setPushingDashboard] = useState(false);
+  const [dashboardPushResult, setDashboardPushResult] = useState<{ success: boolean; dashboardUrl?: string; error?: string } | null>(null);
+
   useEffect(() => {
     if (projectId) {
       loadProject(projectId);
@@ -119,6 +122,36 @@ export default function GeneratePage() {
     }
   };
 
+  const handlePushDashboardToSentry = async () => {
+    if (!currentProject) return;
+
+    if (!confirm('Push this dashboard to your Sentry instance?\n\nMake sure you have configured Sentry API settings first.')) {
+      return;
+    }
+
+    setPushingDashboard(true);
+    setDashboardPushResult(null);
+
+    try {
+      const result = await window.electronAPI.createSentryDashboard(
+        currentProject.id,
+        `${currentProject.project.name} - Performance Dashboard`
+      );
+
+      setDashboardPushResult(result);
+
+      if (result.success) {
+        alert(`✅ Dashboard created successfully!\n\nView it at:\n${result.dashboardUrl}`);
+      } else {
+        throw new Error(result.error);
+      }
+    } catch (error) {
+      alert('Error pushing dashboard to Sentry: ' + error);
+    } finally {
+      setPushingDashboard(false);
+    }
+  };
+
   const handleGenerateAll = async () => {
     setStatus({
       app: { generated: false, loading: true, path: '' },
@@ -217,13 +250,52 @@ export default function GeneratePage() {
           onGenerate={handleGenerateGuide}
         />
 
-        <GenerationCard
-          icon="📊"
-          title="Dashboard JSON"
-          description="Sentry dashboard configuration file based on your instrumentation plan"
-          status={status.dashboard}
-          onGenerate={handleGenerateDashboard}
-        />
+        <div className="bg-white rounded-lg border border-gray-200 p-6">
+          <div className="flex items-start justify-between mb-4">
+            <div className="flex-1">
+              <div className="flex items-center gap-3 mb-2">
+                <span className="text-3xl">📊</span>
+                <h3 className="text-xl font-semibold text-gray-900">Dashboard JSON</h3>
+              </div>
+              <p className="text-gray-600 mb-4">Sentry dashboard configuration file based on your instrumentation plan</p>
+              {status.dashboard.generated && status.dashboard.path && (
+                <div className="text-sm text-green-600 font-medium mb-3">
+                  ✓ Generated: {status.dashboard.path}
+                </div>
+              )}
+              {dashboardPushResult?.success && (
+                <div className="bg-purple-50 border border-purple-200 rounded-lg p-3 mb-3">
+                  <div className="text-sm text-purple-900">
+                    <strong>✓ Pushed to Sentry!</strong>
+                    <br />
+                    <a href={dashboardPushResult.dashboardUrl} target="_blank" rel="noopener noreferrer" className="text-purple-600 hover:underline">
+                      View Dashboard →
+                    </a>
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="flex flex-col gap-2">
+              <Button
+                onClick={handleGenerateDashboard}
+                disabled={status.dashboard.loading}
+                variant={status.dashboard.generated ? 'secondary' : 'primary'}
+              >
+                {status.dashboard.loading ? '⏳ Generating...' : status.dashboard.generated ? 'Regenerate' : 'Generate'}
+              </Button>
+              {status.dashboard.generated && (
+                <Button
+                  onClick={handlePushDashboardToSentry}
+                  disabled={pushingDashboard}
+                  variant="primary"
+                  size="sm"
+                >
+                  {pushingDashboard ? '⏳ Pushing...' : '🚀 Push to Sentry'}
+                </Button>
+              )}
+            </div>
+          </div>
+        </div>
 
         <GenerationCard
           icon="🎲"

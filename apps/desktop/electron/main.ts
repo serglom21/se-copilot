@@ -8,6 +8,7 @@ import { GitHubService } from './services/github';
 import { DataRunnerService } from './services/data-runner';
 import { DeploymentService } from './services/deployment';
 import { ExpoDeployService } from './services/expo-deploy';
+import { SentryAPIService } from './services/sentry-api';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -28,6 +29,7 @@ let githubService: GitHubService;
 let dataRunnerService: DataRunnerService;
 let deploymentService: DeploymentService;
 let expoDeployService: ExpoDeployService;
+let sentryAPIService: SentryAPIService;
 
 function createWindow() {
   win = new BrowserWindow({
@@ -59,11 +61,12 @@ app.whenReady().then(async () => {
   const userDataPath = app.getPath('userData');
   storage = new StorageService(path.join(userDataPath, 'data'));
   llmService = new LLMService(storage);
-  generatorService = new GeneratorService(storage);
+  generatorService = new GeneratorService(storage, llmService);
   githubService = new GitHubService(storage);
   dataRunnerService = new DataRunnerService(storage);
   deploymentService = new DeploymentService(storage);
   expoDeployService = new ExpoDeployService(storage);
+  sentryAPIService = new SentryAPIService(storage);
 
   setupIpcHandlers();
   createWindow();
@@ -178,6 +181,19 @@ function setupIpcHandlers() {
   ipcMain.handle('github:create-and-push', async (_, projectId: string, repoName: string, isPrivate: boolean) => {
     const project = storage.getProject(projectId);
     return githubService.createRepoAndPush(project, repoName, isPrivate);
+  });
+
+  // Sentry API
+  ipcMain.handle('sentry:verify-connection', async () => {
+    return sentryAPIService.verifyConnection();
+  });
+
+  ipcMain.handle('sentry:create-dashboard', async (_, projectId: string, dashboardTitle?: string) => {
+    return sentryAPIService.createDashboard(projectId, dashboardTitle);
+  });
+
+  ipcMain.handle('sentry:list-dashboards', async () => {
+    return sentryAPIService.listDashboards();
   });
 
   // File system

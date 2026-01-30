@@ -22,6 +22,8 @@ export default function RefineCodePage() {
   const [analyzing, setAnalyzing] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
   const [showCode, setShowCode] = useState(false);
+  const [applyingAll, setApplyingAll] = useState(false);
+  const [applyProgress, setApplyProgress] = useState({ current: 0, total: 0 });
 
   useEffect(() => {
     if (projectId) {
@@ -92,6 +94,54 @@ export default function RefineCodePage() {
     setSelectedFile(suggestion.file);
     setRefinementRequest(suggestion.suggestion);
     window.scrollTo({ top: 300, behavior: 'smooth' });
+  };
+
+  const handleApplyAll = async () => {
+    if (suggestions.length === 0) return;
+
+    if (!confirm(`Apply all ${suggestions.length} suggestions automatically?\n\nThis will refine all files with AI-generated changes. The process may take a few minutes.`)) {
+      return;
+    }
+
+    setApplyingAll(true);
+    setApplyProgress({ current: 0, total: suggestions.length });
+
+    try {
+      for (let i = 0; i < suggestions.length; i++) {
+        const suggestion = suggestions[i];
+        setApplyProgress({ current: i + 1, total: suggestions.length });
+
+        console.log(`Applying suggestion ${i + 1}/${suggestions.length}: ${suggestion.file}`);
+
+        try {
+          await window.electronAPI.refineFile(
+            projectId!,
+            suggestion.file,
+            suggestion.suggestion
+          );
+        } catch (error) {
+          console.error(`Failed to apply suggestion for ${suggestion.file}:`, error);
+          // Continue with other suggestions even if one fails
+        }
+
+        // Small delay between requests to avoid overwhelming the LLM
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+
+      // Reload files to show new code
+      await loadFiles();
+
+      // Re-analyze to get new suggestions
+      await analyzeApp();
+
+      alert(`✅ Applied All Suggestions!\n\n${suggestions.length} files have been updated. Review the changes and regenerate artifacts when ready.`);
+
+    } catch (error) {
+      alert('Error applying suggestions: ' + error);
+    } finally {
+      setApplyingAll(false);
+      setApplyProgress({ current: 0, total: 0 });
+    }
   };
 
   const handleRegenerateArtifacts = async () => {
@@ -211,11 +261,42 @@ export default function RefineCodePage() {
       <div className="mb-8">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-2xl font-bold">💡 AI Suggestions</h2>
-          <Button onClick={analyzeApp} disabled={analyzing} variant="secondary">
-            {analyzing ? '🔍 Analyzing...' : '🔄 Re-analyze'}
-          </Button>
+          <div className="flex gap-2">
+            {suggestions.length > 0 && (
+              <Button
+                onClick={handleApplyAll}
+                disabled={applyingAll || analyzing}
+              >
+                {applyingAll
+                  ? `⏳ Applying ${applyProgress.current}/${applyProgress.total}...`
+                  : `✨ Apply All (${suggestions.length})`}
+              </Button>
+            )}
+            <Button onClick={analyzeApp} disabled={analyzing} variant="secondary">
+              {analyzing ? '🔍 Analyzing...' : '🔄 Re-analyze'}
+            </Button>
+          </div>
         </div>
-        
+
+        {applyingAll && (
+          <div className="bg-purple-50 border border-purple-200 rounded-lg p-4 mb-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="font-medium text-purple-900">
+                Applying suggestion {applyProgress.current} of {applyProgress.total}...
+              </span>
+              <span className="text-purple-700 text-sm">
+                {Math.round((applyProgress.current / applyProgress.total) * 100)}%
+              </span>
+            </div>
+            <div className="w-full bg-purple-200 rounded-full h-2">
+              <div
+                className="bg-purple-600 h-2 rounded-full transition-all duration-300"
+                style={{ width: `${(applyProgress.current / applyProgress.total) * 100}%` }}
+              />
+            </div>
+          </div>
+        )}
+
         {analyzing ? (
           <div className="bg-gray-50 rounded-lg p-8 text-center">
             <div className="animate-spin inline-block w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full mb-4"></div>
@@ -239,6 +320,7 @@ export default function RefineCodePage() {
                     onClick={() => handleApplySuggestion(s)}
                     variant="secondary"
                     size="small"
+                    disabled={applyingAll}
                   >
                     Apply →
                   </Button>
@@ -320,6 +402,7 @@ export default function RefineCodePage() {
       <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
         <h3 className="font-semibold text-blue-900 mb-2">💡 Tips</h3>
         <ul className="text-sm text-blue-800 space-y-1">
+          <li>• Use "Apply All" to automatically implement all AI suggestions at once</li>
           <li>• Be specific in your refinement requests for better results</li>
           <li>• All changes are backed up automatically in the /backups folder</li>
           <li>• After refining, regenerate artifacts to update your guide and dashboard</li>

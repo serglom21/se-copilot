@@ -13,6 +13,7 @@ export default function NewProjectPage() {
     vertical: 'ecommerce' as const,
     stackType: 'web' as 'web' | 'mobile' | 'backend-only',
     backendFramework: 'fastapi' as 'express' | 'flask' | 'fastapi',
+    customerWebsite: '',
     notes: ''
   });
 
@@ -48,7 +49,16 @@ export default function NewProjectPage() {
     if (!formData.name.trim()) {
       newErrors.name = 'Project name is required';
     }
-    
+
+    // Validate URL format if provided
+    if (formData.customerWebsite.trim()) {
+      try {
+        new URL(formData.customerWebsite);
+      } catch {
+        newErrors.customerWebsite = 'Please enter a valid URL (e.g., https://example.com)';
+      }
+    }
+
     if (Object.keys(newErrors).length > 0) {
       setErrors(newErrors);
       return;
@@ -63,6 +73,7 @@ export default function NewProjectPage() {
           name: formData.name,
           slug,
           vertical: formData.vertical,
+          customerWebsite: formData.customerWebsite,
           notes: formData.notes,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString()
@@ -129,6 +140,28 @@ export default function NewProjectPage() {
             options={pythonFrameworkOptions}
           />
         )}
+
+        <Input
+          label="Customer Website"
+          placeholder="https://example.com"
+          value={formData.customerWebsite}
+          onChange={e => setFormData({ ...formData, customerWebsite: e.target.value })}
+          error={errors.customerWebsite}
+        />
+
+        <div className="bg-blue-50 p-4 rounded-lg border border-blue-200 -mt-3">
+          <div className="flex items-start gap-2">
+            <span className="text-blue-600 text-lg">ℹ️</span>
+            <div className="text-sm text-blue-900">
+              <p className="font-medium mb-1">How we use this information</p>
+              <p className="text-blue-800">
+                We'll analyze the website to provide specific performance metrics recommendations
+                tailored to your customer's use case. <strong>Company names and branding will never
+                appear in generated code</strong> – all examples remain abstract and generic.
+              </p>
+            </div>
+          </div>
+        </div>
 
         {formData.stackType === 'web' && (
           <div className="bg-blue-50 p-4 rounded-lg border border-blue-200">

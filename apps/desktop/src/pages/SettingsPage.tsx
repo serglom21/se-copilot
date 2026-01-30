@@ -12,6 +12,11 @@ export default function SettingsPage() {
     github: {
       accessToken: '',
       username: ''
+    },
+    sentry: {
+      authToken: '',
+      organization: '',
+      project: ''
     }
   });
 
@@ -169,6 +174,72 @@ export default function SettingsPage() {
                 </div>
               </>
             )}
+          </div>
+        </div>
+
+        {/* Sentry API Settings */}
+        <div className="bg-white rounded-lg border border-gray-200 p-6">
+          <h2 className="text-xl font-semibold text-gray-900 mb-4">Sentry API Configuration</h2>
+          <div className="space-y-4">
+            <Input
+              label="Auth Token"
+              type="password"
+              placeholder="sntrys_..."
+              value={settings.sentry.authToken}
+              onChange={e => setSettings({
+                ...settings,
+                sentry: { ...settings.sentry, authToken: e.target.value }
+              })}
+            />
+            <Input
+              label="Organization Slug"
+              placeholder="my-org"
+              value={settings.sentry.organization}
+              onChange={e => setSettings({
+                ...settings,
+                sentry: { ...settings.sentry, organization: e.target.value }
+              })}
+            />
+            <Input
+              label="Project Slug"
+              placeholder="my-project"
+              value={settings.sentry.project}
+              onChange={e => setSettings({
+                ...settings,
+                sentry: { ...settings.sentry, project: e.target.value }
+              })}
+            />
+            {settings.sentry.authToken && settings.sentry.organization && (
+              <Button
+                size="sm"
+                onClick={async () => {
+                  try {
+                    const result = await window.electronAPI.verifySentryConnection();
+                    if (result.success) {
+                      alert(`✓ Connected to organization: ${result.organization}`);
+                    } else {
+                      alert('✗ Connection failed: ' + result.error);
+                    }
+                  } catch (error) {
+                    alert('Error verifying connection: ' + error);
+                  }
+                }}
+              >
+                Verify Connection
+              </Button>
+            )}
+            <div className="bg-purple-50 p-4 rounded-lg text-sm text-purple-800">
+              <strong>Setup Instructions:</strong>
+              <ol className="list-decimal list-inside mt-2 space-y-1">
+                <li>Go to <a href="https://sentry.io/settings/account/api/auth-tokens/" target="_blank" rel="noopener noreferrer" className="underline">Sentry Auth Tokens</a></li>
+                <li>Create a token with <code className="bg-purple-100 px-1 rounded">org:read</code> and <code className="bg-purple-100 px-1 rounded">project:write</code> scopes</li>
+                <li>Paste the token above</li>
+                <li>Enter your organization slug (from your Sentry URL: sentry.io/organizations/<strong>org-slug</strong>/)</li>
+                <li>Enter your project slug (from your Sentry URL: sentry.io/organizations/org-slug/projects/<strong>project-slug</strong>/)</li>
+                <li>Click "Verify Connection" to test</li>
+                <li>Save settings</li>
+              </ol>
+            </div>
           </div>
         </div>
 

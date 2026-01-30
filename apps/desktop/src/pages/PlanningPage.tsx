@@ -63,7 +63,12 @@ export default function PlanningPage() {
   };
 
   const handleGeneratePlan = async () => {
-    if (!confirm('Generate an instrumentation plan using AI? This will suggest spans and attributes based on your project.')) {
+    const hasWebsite = currentProject?.project.customerWebsite;
+    const confirmMessage = hasWebsite
+      ? 'Generate an instrumentation plan using AI? This will analyze your customer website and suggest relevant spans and attributes.'
+      : 'Generate an instrumentation plan using AI? This will suggest spans and attributes based on your project.';
+
+    if (!confirm(confirmMessage)) {
       return;
     }
 
@@ -129,6 +134,25 @@ export default function PlanningPage() {
         <div className="p-6 border-b border-gray-200">
           <h2 className="text-2xl font-bold text-gray-900">Chat & Planning</h2>
           <p className="text-gray-600 mt-1">Discuss instrumentation with AI</p>
+          {currentProject.project.customerWebsite && (
+            <div className="mt-3 bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm">
+              <div className="flex items-center gap-2 text-blue-900">
+                <span>🌐</span>
+                <div>
+                  <span className="font-medium">Context-aware mode:</span> AI will analyze{' '}
+                  <a
+                    href={currentProject.project.customerWebsite}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-blue-600 hover:underline font-medium"
+                  >
+                    {new URL(currentProject.project.customerWebsite).hostname}
+                  </a>
+                  {' '}to provide tailored recommendations
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
@@ -176,7 +200,11 @@ export default function PlanningPage() {
               disabled={generating}
               className="w-full"
             >
-              {generating ? '⏳ Generating...' : '✨ Generate Plan with AI'}
+              {generating
+                ? (currentProject?.project.customerWebsite
+                    ? '🔍 Analyzing website & generating...'
+                    : '⏳ Generating...')
+                : '✨ Generate Plan with AI'}
             </Button>
           </div>
         </form>

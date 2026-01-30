@@ -77,9 +77,12 @@ export const ProjectMetadataSchema = z.object({
   name: z.string().min(1, 'Project name is required'),
   slug: z.string().min(1, 'Project slug is required'),
   vertical: VerticalSchema,
+  customerWebsite: z.string().url('Please enter a valid URL').optional().or(z.literal('')),
   notes: z.string().default(''),
   createdAt: z.string().datetime(),
-  updatedAt: z.string().datetime()
+  updatedAt: z.string().datetime(),
+  githubRepoUrl: z.string().optional(),
+  githubRepoName: z.string().optional()
 });
 
 export type ProjectMetadata = z.infer<typeof ProjectMetadataSchema>;
@@ -114,6 +117,11 @@ export const SettingsSchema = z.object({
   github: z.object({
     accessToken: z.string().optional(),
     username: z.string().optional()
+  }).default({}),
+  sentry: z.object({
+    authToken: z.string().optional(),
+    organization: z.string().optional(),
+    project: z.string().optional()
   }).default({})
 });
 

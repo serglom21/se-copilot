@@ -355,6 +355,29 @@ export class LLMService {
 - cart.addProduct`;
     }
 
+    // Analyze website if provided
+    let websiteContext = '';
+    if (project.project.customerWebsite) {
+      console.log(`Analyzing customer website: ${project.project.customerWebsite}`);
+      const websiteAnalysis = await this.analyzeCustomerWebsite(project.project.customerWebsite);
+
+      websiteContext = `
+Customer Website: ${project.project.customerWebsite}
+
+WEBSITE ANALYSIS:
+${websiteAnalysis}
+
+IMPORTANT INSTRUCTIONS:
+- Use the website analysis above to inform your recommendations
+- Suggest performance metrics that would be relevant for this specific type of business
+- Consider the user journeys and critical paths identified in the analysis
+- NEVER include company names, brand names, or specific product names in generated code
+- Keep all code examples abstract and generic (e.g., "product", "item", "user")
+- Use generic terminology that applies to any business in this vertical
+- Focus on the TYPES of operations (e.g., "checkout flow", "search", "filtering") not brand-specific features
+`;
+    }
+
     const messages: ChatMessage[] = [
       {
         role: 'system',
@@ -362,6 +385,15 @@ export class LLMService {
 
 The application uses:
 ${stackDescription}
+
+${websiteContext}
+
+CRITICAL REQUIREMENTS:
+- If a customer website is provided, use it to understand the business model and user flows
+- Recommend performance metrics specific to their type of application
+- All generated code MUST be abstract and generic
+- NEVER reference company names, brand names, or specific products
+- Use placeholder names like "product", "item", "service", "user"
 
 Generate a JSON response with the following structure:
 {
@@ -579,15 +611,27 @@ Return ONLY valid JSON.`
       spanSuggestions = `- Web spans: \`checkout.validate\`, \`payment.process\`, \`cart.addProduct\``;
     }
 
+    const websiteNote = project.project.customerWebsite
+      ? `\nCustomer Website: ${project.project.customerWebsite}\n(Reference this to provide context-aware recommendations, but keep all code abstract)`
+      : '';
+
     return `You are an expert Sentry Sales Engineer helping to plan instrumentation for a customer demo.
 
 Project: ${project.project.name}
 Vertical: ${project.project.vertical}
-Stack: ${stackDescription}
+Stack: ${stackDescription}${websiteNote}
 
 Current instrumentation plan:
 - Transactions: ${project.instrumentation.transactions.join(', ') || 'None yet'}
 - Custom spans: ${project.instrumentation.spans.length} defined
+
+${project.project.customerWebsite ? `
+IMPORTANT PRIVACY GUIDELINES:
+- Use the customer website to understand their business model and user journeys
+- Provide specific, relevant performance metrics recommendations
+- NEVER include company names or brand names in code examples
+- Keep all code abstract (use "product", "item", "user", not specific brand names)
+` : ''}
 
 Your role is to:
 1. Answer questions about Sentry instrumentation best practices
@@ -604,6 +648,180 @@ ${spanSuggestions}
 The system will automatically extract and add these spans to the instrumentation spec!
 
 Be concise and practical. Focus on delivering value for a demo.`;
+  }
+
+  /**
+   * Generate complete Next.js pages based on project requirements
+   */
+  async generateWebPages(project: EngagementSpec): Promise<{
+    pages: Array<{
+      name: string;
+      filename: string;
+      code: string;
+      description: string;
+    }>;
+  }> {
+    const settings = this.storage.getSettings();
+    if (!settings.llm.apiKey || !settings.llm.baseUrl) {
+      throw new Error('LLM settings not configured');
+    }
+
+    const instrumentationDetails = project.instrumentation.spans
+      .filter(s => s.layer === 'frontend')
+      .map(span => `- ${span.name} (${span.op}): ${span.description}\n  Attributes: ${Object.keys(span.attributes).join(', ') || 'none'}`)
+      .join('\n');
+
+    const prompt = `You are an expert Next.js developer with deep knowledge of Sentry instrumentation. Generate a complete, production-ready web application based on these requirements:
+
+**PROJECT DETAILS:**
+- Name: ${project.project.name}
+- Vertical: ${project.project.vertical}
+- Customer Requirements: ${project.project.notes || 'Build a functional demo application'}
+
+**SENTRY FRONTEND INSTRUMENTATION REQUIREMENTS (MUST IMPLEMENT ALL):**
+${instrumentationDetails}
+
+**CRITICAL REQUIREMENTS:**
+1. You MUST implement EVERY span listed above using the exact span names and operations
+2. Import instrumentation functions from '@/lib/instrumentation'
+3. Use the pattern: \`import { trace_span_name } from '@/lib/instrumentation'\`
+4. Actually CALL these functions in the appropriate places
+5. Set all required attributes using the attributes parameter
+
+**TASK:** Generate 3-5 Next.js pages (App Router) that implement the functionality described in the customer requirements.
+
+**PAGE REQUIREMENTS:**
+1. Each page must be fully functional with:
+   - 'use client' directive at the top
+   - State management (useState, useEffect)
+   - API calls to backend (fetch to http://localhost:3001/api/...)
+   - Sentry instrumentation using the EXACT spans listed above
+   - Tailwind CSS styling
+   - Loading states, error handling, empty states
+   - Interactive elements (buttons, forms, cards)
+2. Use emojis for placeholder images (🎧 💻 💰 📊 🏠 🛒 ⚡ etc.)
+3. Implement the EXACT spans listed above - import them from @/lib/instrumentation
+4. Example of proper span usage:
+   \`\`\`typescript
+   import { trace_checkout_validate } from '@/lib/instrumentation';
+
+   const handleCheckout = async () => {
+     await trace_checkout_validate(async () => {
+       const response = await fetch('/api/checkout', {
+         method: 'POST',
+         body: JSON.stringify(cartData)
+       });
+       return response.json();
+     }, {
+       cart_value: totalPrice,
+       item_count: items.length
+     });
+   };
+   \`\`\`
+5. Use Next.js App Router conventions (page.tsx files)
+
+**CODE STRUCTURE EXAMPLE:**
+\`\`\`typescript
+'use client';
+import React, { useEffect, useState } from 'react';
+import * as Sentry from '@sentry/nextjs';
+import { trace_product_load, trace_cart_add } from '@/lib/instrumentation';
+
+export default function ProductsPage() {
+  const [products, setProducts] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    loadProducts();
+  }, []);
+
+  const loadProducts = async () => {
+    setLoading(true);
+    try {
+      await trace_product_load(async () => {
+        const response = await fetch('http://localhost:3001/api/products');
+        const data = await response.json();
+        setProducts(data);
+      }, { page: 'products' });
+    } catch (error) {
+      Sentry.captureException(error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAddToCart = async (product: any) => {
+    await trace_cart_add(async () => {
+      // Add to cart logic
+    }, { product_id: product.id, price: product.price });
+  };
+
+  if (loading) return <div className="flex justify-center items-center min-h-screen"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-500"></div></div>;
+
+  return (
+    <div className="container mx-auto px-4 py-8">
+      <h1 className="text-4xl font-bold mb-8">Products</h1>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        {products.map(product => (
+          <div key={product.id} className="bg-white rounded-lg shadow-md p-6">
+            <div className="text-5xl mb-4">{product.image}</div>
+            <h2 className="text-xl font-semibold mb-2">{product.name}</h2>
+            <p className="text-gray-600 mb-4">\${product.price}</p>
+            <button onClick={() => handleAddToCart(product)} className="w-full bg-purple-600 text-white py-2 rounded-lg hover:bg-purple-700">
+              Add to Cart
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+\`\`\`
+
+Return ONLY valid JSON in this exact format (no markdown):
+{
+  "pages": [
+    {
+      "name": "HomePage",
+      "filename": "page.tsx",
+      "code": "import React...",
+      "description": "Main home page"
+    },
+    {
+      "name": "ProductsPage",
+      "filename": "products/page.tsx",
+      "code": "import React...",
+      "description": "Products listing page"
+    }
+  ]
+}`;
+
+    const messages: ChatMessage[] = [
+      { role: 'user', content: prompt }
+    ];
+
+    const response = await this.callLLM(messages, settings.llm);
+
+    try {
+      const jsonString = this.extractJsonFromResponse(response);
+      const result = JSON.parse(jsonString);
+
+      if (!result.pages || !Array.isArray(result.pages)) {
+        throw new Error('Invalid response: missing pages array');
+      }
+
+      for (const page of result.pages) {
+        if (!page.name || !page.filename || !page.code) {
+          throw new Error(`Invalid page: ${JSON.stringify(page)}`);
+        }
+      }
+
+      console.log(`✅ Generated ${result.pages.length} Next.js pages`);
+      return result;
+    } catch (error) {
+      console.error('Failed to generate web pages:', error);
+      throw new Error(`Failed to generate web pages: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   /**
@@ -785,6 +1003,109 @@ Return ONLY valid JSON in this exact format (no markdown):
       console.error('Failed to generate mobile screens:', error);
       throw new Error(`Failed to generate mobile screens: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  /**
+   * Generate Express API routes with backend instrumentation
+   */
+  async generateExpressRoutes(project: EngagementSpec): Promise<{ code: string }> {
+    const settings = this.storage.getSettings();
+    if (!settings.llm.apiKey || !settings.llm.baseUrl) {
+      throw new Error('LLM settings not configured');
+    }
+
+    const backendSpans = project.instrumentation.spans
+      .filter(s => s.layer === 'backend')
+      .map(span => `- ${span.name} (${span.op}): ${span.description}\n  Attributes: ${Object.keys(span.attributes).join(', ') || 'none'}`)
+      .join('\n');
+
+    const prompt = `Generate Express.js API routes for a ${project.project.vertical} application with Sentry instrumentation.
+
+**PROJECT:** ${project.project.name}
+**REQUIREMENTS:** ${project.project.notes || 'Build functional API endpoints'}
+
+**SENTRY BACKEND INSTRUMENTATION REQUIREMENTS (MUST IMPLEMENT ALL):**
+${backendSpans}
+
+**CRITICAL REQUIREMENTS:**
+1. You MUST implement EVERY backend span listed above
+2. Import instrumentation from '../utils/instrumentation'
+3. Use pattern: \`const { trace_span_name } = require('../utils/instrumentation');\`
+4. Actually CALL these trace functions in the appropriate API routes
+5. Set all required attributes
+
+**TASK:** Create an Express router file (api.ts) with 5-8 RESTful endpoints.
+
+**REQUIREMENTS:**
+1. Use Express Router
+2. Include proper error handling with Sentry.captureException
+3. Return mock data that makes sense for the vertical
+4. Implement ALL spans listed above in the appropriate routes
+5. Example of proper instrumentation:
+\`\`\`javascript
+const { trace_payment_process, trace_inventory_check } = require('../utils/instrumentation');
+
+router.post('/checkout', async (req, res) => {
+  try {
+    const result = await trace_payment_process(async () => {
+      // Simulate payment processing
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      // Check inventory
+      await trace_inventory_check(async () => {
+        // Inventory check logic
+      }, { item_count: req.body.items.length });
+
+      return { orderId: 'ORD-' + Date.now() };
+    }, {
+      amount: req.body.total,
+      payment_method: req.body.paymentMethod
+    });
+
+    res.json({ success: true, ...result });
+  } catch (error) {
+    Sentry.captureException(error);
+    res.status(500).json({ error: 'Checkout failed' });
+  }
+});
+\`\`\`
+
+**STRUCTURE:**
+\`\`\`javascript
+const express = require('express');
+const router = express.Router();
+const Sentry = require('@sentry/node');
+const { trace_span1, trace_span2 } = require('../utils/instrumentation');
+
+// GET endpoints for fetching data
+router.get('/products', async (req, res) => { /* ... */ });
+router.get('/products/:id', async (req, res) => { /* ... */ });
+
+// POST endpoints for creating/processing
+router.post('/checkout', async (req, res) => { /* ... */ });
+router.post('/cart', async (req, res) => { /* ... */ });
+
+module.exports = router;
+\`\`\`
+
+Return ONLY the complete JavaScript code (no JSON wrapper, no markdown code blocks).`;
+
+    const messages: ChatMessage[] = [
+      { role: 'user', content: prompt }
+    ];
+
+    const response = await this.callLLM(messages, settings.llm);
+
+    // Remove markdown code blocks if present
+    let code = response.trim();
+    if (code.startsWith('```')) {
+      code = code.replace(/^```(?:javascript|js|typescript|ts)?\n?/, '');
+      code = code.replace(/\n?```$/, '');
+      code = code.trim();
+    }
+
+    console.log('✅ Generated Express API routes with instrumentation');
+    return { code };
   }
 
   /**
@@ -1127,6 +1448,74 @@ Return ONLY valid JSON (no markdown):
     }
 
     return cleanedResponse.substring(jsonStartIndex, jsonEndIndex + 1);
+  }
+
+  /**
+   * Analyze customer website to understand business model and user journeys
+   */
+  private async analyzeCustomerWebsite(websiteUrl: string): Promise<string> {
+    try {
+      const settings = this.storage.getSettings();
+
+      // Fetch the website content
+      console.log('Fetching website content...');
+      const response = await fetch(websiteUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        },
+        redirect: 'follow'
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch website: ${response.status}`);
+      }
+
+      const html = await response.text();
+
+      // Extract text content from HTML (basic extraction)
+      const textContent = html
+        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .substring(0, 8000); // Limit to first 8000 chars
+
+      console.log('Analyzing website with LLM...');
+
+      // Use LLM to analyze the website
+      const analysisMessages: ChatMessage[] = [
+        {
+          role: 'system',
+          content: `You are a business analyst. Analyze the website content and provide a concise summary of:
+1. Business Type & Model (e.g., B2C e-commerce, SaaS platform, marketplace)
+2. Primary Products/Services (generic categories only, DO NOT mention brand names)
+3. Key User Journeys (e.g., browse → search → filter → checkout, signup → onboarding → dashboard)
+4. Critical Features (e.g., search, filtering, checkout, payments, user accounts, recommendations)
+5. Performance-Critical Operations (what would impact user experience most)
+
+IMPORTANT:
+- Focus on TYPES of operations, not specific brand features
+- Use generic terminology (e.g., "product catalog" not specific product names)
+- Identify what performance metrics would matter most for this type of business
+- Keep the analysis concise (under 300 words)
+
+Return a structured analysis that can be used to recommend relevant Sentry instrumentation.`
+        },
+        {
+          role: 'user',
+          content: `Website URL: ${websiteUrl}\n\nContent:\n${textContent}`
+        }
+      ];
+
+      const analysis = await this.callLLM(analysisMessages, settings.llm);
+      console.log('Website analysis complete');
+
+      return analysis;
+    } catch (error) {
+      console.error('Failed to analyze website:', error);
+      return `Failed to fetch website (${error instanceof Error ? error.message : 'Unknown error'}). Proceeding with vertical-based recommendations only.`;
+    }
   }
 
   private async callLLM(messages: ChatMessage[], config: { baseUrl?: string; apiKey?: string; model?: string }): Promise<string> {

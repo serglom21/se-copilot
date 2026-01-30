@@ -1,14 +1,17 @@
 import fs from 'fs';
 import path from 'path';
 import { StorageService } from './storage';
+import { LLMService } from './llm';
 import { EngagementSpec, SpanDefinition } from '../../src/types/spec';
 
 export class GeneratorService {
   private storage: StorageService;
+  private llm: LLMService;
   private templatesDir: string;
 
-  constructor(storage: StorageService) {
+  constructor(storage: StorageService, llm: LLMService) {
     this.storage = storage;
+    this.llm = llm;
     this.templatesDir = path.join(__dirname, '../../../../templates/reference-app');
   }
 
@@ -27,8 +30,8 @@ export class GeneratorService {
         this.generateBackend(appPath, project); // Express backend
       } else {
         this.createDirectoryStructure(appPath);
-        this.generateFrontend(appPath, project);
-        this.generateBackend(appPath, project); // Express backend
+        await this.generateFrontend(appPath, project);
+        await this.generateBackend(appPath, project); // Express backend
       }
 
       // Generate config files (README, etc.)
@@ -143,7 +146,7 @@ NUM_ERRORS=20
     });
   }
 
-  private generateFrontend(appPath: string, project: EngagementSpec): void {
+  private async generateFrontend(appPath: string, project: EngagementSpec): Promise<void> {
     const frontendPath = path.join(appPath, 'frontend');
 
     // Package.json
@@ -242,14 +245,14 @@ module.exports = {
     // Sentry config
     this.generateSentryConfig(frontendPath, 'frontend', project);
 
-    // Pages
-    this.generateFrontendPages(frontendPath, project);
-
-    // Instrumentation
+    // Instrumentation (must be generated before pages)
     this.generateFrontendInstrumentation(frontendPath, project);
+
+    // Pages - use LLM to generate with proper instrumentation
+    await this.generateFrontendPagesWithLLM(frontendPath, project);
   }
 
-  private generateBackend(appPath: string, project: EngagementSpec): void {
+  private async generateBackend(appPath: string, project: EngagementSpec): Promise<void> {
     const backendPath = path.join(appPath, 'backend');
 
     // Package.json
@@ -303,11 +306,11 @@ module.exports = {
     // Main server file
     this.generateBackendServer(backendPath, project);
 
-    // Routes
-    this.generateBackendRoutes(backendPath, project);
-
-    // Sentry instrumentation
+    // Sentry instrumentation (must be generated before routes)
     this.generateBackendInstrumentation(backendPath, project);
+
+    // Routes - use LLM to generate with proper instrumentation
+    await this.generateBackendRoutesWithLLM(backendPath, project);
   }
 
   private generateSentryConfig(basePath: string, layer: 'frontend' | 'backend', project: EngagementSpec): void {
@@ -343,6 +346,112 @@ module.exports = Sentry;
 `;
 
     fs.writeFileSync(sentryConfigPath, config);
+  }
+
+  private async generateFrontendPagesWithLLM(frontendPath: string, project: EngagementSpec): Promise<void> {
+    console.log('🤖 Using LLM to generate Next.js pages with instrumentation...');
+    const appPath = path.join(frontendPath, 'app');
+
+    try {
+      console.log('📝 Generating pages with LLM...');
+      const { pages } = await this.llm.generateWebPages(project);
+      console.log(`✅ LLM generated ${pages.length} Next.js pages`);
+
+      // Write generated pages
+      for (const page of pages) {
+        const pagePath = path.join(appPath, page.filename);
+        const pageDir = path.dirname(pagePath);
+
+        // Create directory if it doesn't exist
+        if (!fs.existsSync(pageDir)) {
+          fs.mkdirSync(pageDir, { recursive: true });
+        }
+
+        fs.writeFileSync(pagePath, page.code);
+        console.log(`  ✓ Created ${page.filename}: ${page.description}`);
+      }
+
+      // Create globals.css
+      const globalsCss = `@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  color: var(--foreground);
+  background: var(--background);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+/* Custom components */
+.card {
+  @apply bg-white rounded-lg shadow-md p-6 hover:shadow-lg transition-shadow;
+}
+
+.btn {
+  @apply px-4 py-2 rounded-lg font-medium transition-colors;
+}
+
+.btn-primary {
+  @apply bg-purple-600 text-white hover:bg-purple-700;
+}
+
+.btn-secondary {
+  @apply bg-gray-200 text-gray-800 hover:bg-gray-300;
+}
+
+.input {
+  @apply w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent;
+}
+`;
+      fs.writeFileSync(path.join(appPath, 'globals.css'), globalsCss);
+
+      // Create layout.tsx
+      const layout = `import type { Metadata } from 'next';
+import './globals.css';
+
+export const metadata: Metadata = {
+  title: '${project.project.name}',
+  description: 'Generated by SE Copilot',
+};
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <body>{children}</body>
+    </html>
+  );
+}
+`;
+      fs.writeFileSync(path.join(appPath, 'layout.tsx'), layout);
+
+    } catch (error) {
+      console.error('❌ Failed to generate pages with LLM:', error);
+      console.log('⚠️  Falling back to template pages...');
+      // Fallback to old method if LLM fails
+      this.generateFrontendPages(frontendPath, project);
+    }
   }
 
   private generateFrontendPages(frontendPath: string, project: EngagementSpec): void {
@@ -1196,6 +1305,25 @@ SENTRY_ENVIRONMENT=development
 PORT=3001
 `;
     fs.writeFileSync(path.join(backendPath, '.env.example'), envExample);
+  }
+
+  private async generateBackendRoutesWithLLM(backendPath: string, project: EngagementSpec): Promise<void> {
+    console.log('🤖 Using LLM to generate Express routes with instrumentation...');
+
+    try {
+      console.log('📝 Generating routes with LLM...');
+      const { code } = await this.llm.generateExpressRoutes(project);
+      console.log('✅ LLM generated Express routes');
+
+      // Write routes file
+      fs.writeFileSync(path.join(backendPath, 'src', 'routes', 'api.ts'), code);
+
+    } catch (error) {
+      console.error('❌ Failed to generate routes with LLM:', error);
+      console.log('⚠️  Falling back to template routes...');
+      // Fallback to old method if LLM fails
+      this.generateBackendRoutes(backendPath, project);
+    }
   }
 
   private generateBackendRoutes(backendPath: string, project: EngagementSpec): void {

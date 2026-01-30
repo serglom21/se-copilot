@@ -59,6 +59,20 @@ export default function HomePage() {
                     <span className="flex items-center gap-1">
                       <span className="font-medium">Vertical:</span> {project.project.vertical}
                     </span>
+                    {project.project.customerWebsite && (
+                      <span className="flex items-center gap-1">
+                        <span className="font-medium">Website:</span>
+                        <a
+                          href={project.project.customerWebsite}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-600 hover:underline"
+                          onClick={e => e.stopPropagation()}
+                        >
+                          {new URL(project.project.customerWebsite).hostname}
+                        </a>
+                      </span>
+                    )}
                     <span className="flex items-center gap-1">
                       <span className="font-medium">Status:</span>
                       <StatusBadge status={project.status} />

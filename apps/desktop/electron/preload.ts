@@ -29,6 +29,11 @@ export interface IElectronAPI {
   logoutGitHub: () => Promise<void>;
   createAndPushRepo: (projectId: string, repoName: string, isPrivate: boolean) => Promise<{ success: boolean; repoUrl?: string; error?: string }>;
 
+  // Sentry API
+  verifySentryConnection: () => Promise<{ success: boolean; organization?: string; error?: string }>;
+  createSentryDashboard: (projectId: string, dashboardTitle?: string) => Promise<{ success: boolean; dashboardUrl?: string; error?: string }>;
+  listSentryDashboards: () => Promise<{ success: boolean; dashboards?: any[]; error?: string }>;
+
   // File system
   getOutputPath: (projectId: string) => Promise<string>;
 
@@ -94,6 +99,11 @@ const electronAPI: IElectronAPI = {
   getGitHubStatus: () => ipcRenderer.invoke('github:get-status'),
   logoutGitHub: () => ipcRenderer.invoke('github:logout'),
   createAndPushRepo: (projectId, repoName, isPrivate) => ipcRenderer.invoke('github:create-and-push', projectId, repoName, isPrivate),
+
+  // Sentry API
+  verifySentryConnection: () => ipcRenderer.invoke('sentry:verify-connection'),
+  createSentryDashboard: (projectId, dashboardTitle) => ipcRenderer.invoke('sentry:create-dashboard', projectId, dashboardTitle),
+  listSentryDashboards: () => ipcRenderer.invoke('sentry:list-dashboards'),
 
   // File system
   getOutputPath: (projectId) => ipcRenderer.invoke('fs:get-output-path', projectId),
