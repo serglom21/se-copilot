@@ -27,17 +27,21 @@ export default function GeneratePage() {
 
   // Check if artifacts exist on mount
   useEffect(() => {
-    if (currentProject) {
-      // Set status based on project state
-      if (currentProject.status === 'generated' || currentProject.status === 'published') {
+    const loadArtifactPaths = async () => {
+      if (currentProject && (currentProject.status === 'generated' || currentProject.status === 'published')) {
+        // Get the output path and construct artifact paths
+        const outputPath = await window.electronAPI.getOutputPath(currentProject.id);
+
         setStatus({
-          app: { generated: true, loading: false, path: '' },
-          guide: { generated: true, loading: false, path: '' },
-          dashboard: { generated: true, loading: false, path: '' },
-          dataScript: { generated: true, loading: false, path: '' }
+          app: { generated: true, loading: false, path: outputPath },
+          guide: { generated: true, loading: false, path: `${outputPath}/IMPLEMENTATION_GUIDE.md` },
+          dashboard: { generated: true, loading: false, path: `${outputPath}/sentry-dashboard.json` },
+          dataScript: { generated: true, loading: false, path: `${outputPath}/generate_data.py` }
         });
       }
-    }
+    };
+
+    loadArtifactPaths();
   }, [currentProject]);
 
   const handleGenerateApp = async () => {
