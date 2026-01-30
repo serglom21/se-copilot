@@ -104,6 +104,9 @@ export default function PublishPage() {
           repoUrl: result.repoUrl,
           isUpdate: result.isUpdate
         });
+
+        // Reload project to get updated GitHub URL
+        await loadProject(currentProject.id);
       } else {
         throw new Error(result.error);
       }
