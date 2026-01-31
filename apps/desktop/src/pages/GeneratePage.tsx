@@ -19,6 +19,9 @@ export default function GeneratePage() {
   const [pushingDashboard, setPushingDashboard] = useState(false);
   const [dashboardPushResult, setDashboardPushResult] = useState<{ success: boolean; dashboardUrl?: string; error?: string } | null>(null);
 
+  const [exporting, setExporting] = useState(false);
+  const [exportResult, setExportResult] = useState<{ success: boolean; outputPath?: string; error?: string } | null>(null);
+
   useEffect(() => {
     if (projectId) {
       loadProject(projectId);
@@ -199,6 +202,28 @@ export default function GeneratePage() {
     }
   };
 
+  const handleExportDemoPackage = async () => {
+    if (!currentProject) return;
+
+    setExporting(true);
+    setExportResult(null);
+
+    try {
+      const result = await window.electronAPI.exportDemoPackage(currentProject.id);
+
+      if (result.success) {
+        setExportResult(result);
+        alert(`✅ Demo package exported successfully!\n\nLocation: ${result.outputPath}`);
+      } else {
+        throw new Error(result.error);
+      }
+    } catch (error) {
+      alert('Error exporting demo package: ' + error);
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const allGenerated = status.app.generated && status.guide.generated && status.dashboard.generated && status.dataScript.generated;
 
   if (!currentProject) {
@@ -351,12 +376,22 @@ export default function GeneratePage() {
           🚀 Generate All
         </Button>
         {allGenerated && (
-          <Button
-            size="lg"
-            onClick={() => navigate(`/project/${currentProject.id}/publish`)}
-          >
-            Next: Publish →
-          </Button>
+          <>
+            <Button
+              size="lg"
+              onClick={handleExportDemoPackage}
+              disabled={exporting}
+              variant="secondary"
+            >
+              {exporting ? '⏳ Exporting...' : '📦 Export Demo Package'}
+            </Button>
+            <Button
+              size="lg"
+              onClick={() => navigate(`/project/${currentProject.id}/publish`)}
+            >
+              Next: Publish →
+            </Button>
+          </>
         )}
       </div>
     </div>

@@ -68,6 +68,9 @@ export interface IElectronAPI {
   refineFile: (projectId: string, filePath: string, refinementRequest: string) => Promise<{ code: string; changes: string }>;
   regenerateArtifacts: (projectId: string) => Promise<{ success: boolean; guideError?: string; dashboardError?: string }>;
 
+  // Export
+  exportDemoPackage: (projectId: string) => Promise<{ success: boolean; outputPath?: string; error?: string }>;
+
   // Events
   onMainProcessMessage: (callback: (message: string) => void) => void;
 
@@ -152,6 +155,9 @@ const electronAPI: IElectronAPI = {
   analyzeGeneratedApp: (projectId) => ipcRenderer.invoke('refine:analyze', projectId),
   refineFile: (projectId, filePath, refinementRequest) => ipcRenderer.invoke('refine:update-file', projectId, filePath, refinementRequest),
   regenerateArtifacts: (projectId) => ipcRenderer.invoke('refine:regenerate-artifacts', projectId),
+
+  // Export
+  exportDemoPackage: (projectId) => ipcRenderer.invoke('export:demo-package', projectId),
 
   // Events
   onMainProcessMessage: (callback) => {

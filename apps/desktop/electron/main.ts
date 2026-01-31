@@ -10,6 +10,7 @@ import { DataRunnerService } from './services/data-runner';
 import { DeploymentService } from './services/deployment';
 import { ExpoDeployService } from './services/expo-deploy';
 import { SentryAPIService } from './services/sentry-api';
+import { ExportService } from './services/export';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -31,6 +32,7 @@ let dataRunnerService: DataRunnerService;
 let deploymentService: DeploymentService;
 let expoDeployService: ExpoDeployService;
 let sentryAPIService: SentryAPIService;
+let exportService: ExportService;
 
 function createWindow() {
   win = new BrowserWindow({
@@ -68,6 +70,7 @@ app.whenReady().then(async () => {
   deploymentService = new DeploymentService(storage);
   expoDeployService = new ExpoDeployService(storage);
   sentryAPIService = new SentryAPIService(storage);
+  exportService = new ExportService(storage);
 
   setupIpcHandlers();
   createWindow();
@@ -289,6 +292,11 @@ function setupIpcHandlers() {
       guideError: guideResult.error,
       dashboardError: dashboardResult.error
     };
+  });
+
+  // Export Demo Package
+  ipcMain.handle('export:demo-package', async (_, projectId: string) => {
+    return exportService.generateDemoPackage(projectId);
   });
 
   // Browser

@@ -21,6 +21,8 @@ export default function PublishPage() {
   const [publishResult, setPublishResult] = useState<{ success: boolean; repoUrl?: string; isUpdate?: boolean } | null>(null);
   const [authInProgress, setAuthInProgress] = useState(false);
 
+  const [exporting, setExporting] = useState(false);
+
   useEffect(() => {
     if (projectId) {
       loadProject(projectId);
@@ -114,6 +116,26 @@ export default function PublishPage() {
       alert('Error publishing to GitHub: ' + error);
     } finally {
       setPublishing(false);
+    }
+  };
+
+  const handleExportDemoPackage = async () => {
+    if (!currentProject) return;
+
+    setExporting(true);
+
+    try {
+      const result = await window.electronAPI.exportDemoPackage(currentProject.id);
+
+      if (result.success) {
+        alert(`✅ Demo package exported successfully!\n\nLocation: ${result.outputPath}\n\nThis package includes:\n• GitHub repo link\n• Implementation guide\n• Dashboard configuration\n• Quick start instructions`);
+      } else {
+        throw new Error(result.error);
+      }
+    } catch (error) {
+      alert('Error exporting demo package: ' + error);
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -295,6 +317,13 @@ export default function PublishPage() {
                     View on GitHub →
                   </button>
                 )}
+                <Button
+                  variant="secondary"
+                  onClick={handleExportDemoPackage}
+                  disabled={exporting}
+                >
+                  {exporting ? '⏳ Exporting...' : '📦 Export Package'}
+                </Button>
                 <Button
                   variant="secondary"
                   onClick={() => setPublishResult(null)}
