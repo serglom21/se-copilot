@@ -3,7 +3,18 @@ import { EngagementSpec } from '../../src/types/spec';
 import fs from 'fs';
 import path from 'path';
 
-const SENTRY_API_BASE = 'https://sentry.io/api/0';
+// Default to sentry.io, but support custom instances via organization slug
+function getSentryApiBase(organization: string): string {
+  // Check if organization slug appears to be a custom instance (contains domain-like patterns)
+  // For custom instances, use: https://{org}.sentry.io/api/0
+  // For standard: https://sentry.io/api/0
+  if (organization.includes('.')) {
+    // If the org has a dot, it's likely a full domain, use sentry.io
+    return 'https://sentry.io/api/0';
+  }
+  // Try custom instance first (many orgs have dedicated instances)
+  return `https://${organization}.sentry.io/api/0`;
+}
 
 export class SentryAPIService {
   private storage: StorageService;
@@ -23,8 +34,9 @@ export class SentryAPIService {
     }
 
     try {
+      const apiBase = getSentryApiBase(settings.sentry.organization);
       const response = await fetch(
-        `${SENTRY_API_BASE}/organizations/${settings.sentry.organization}/`,
+        `${apiBase}/organizations/${settings.sentry.organization}/`,
         {
           headers: {
             'Authorization': `Bearer ${settings.sentry.authToken}`,
@@ -54,13 +66,20 @@ export class SentryAPIService {
 
   async createDashboard(
     projectId: string,
-    dashboardTitle?: string
+    dashboardTitle?: string,
+    credentials?: {
+      authToken: string;
+      organization: string;
+    }
   ): Promise<{ success: boolean; dashboardUrl?: string; error?: string }> {
     try {
+      // Use provided credentials or fall back to settings
       const settings = this.storage.getSettings();
+      const authToken = (credentials?.authToken || settings.sentry.authToken).trim();
+      const organization = (credentials?.organization || settings.sentry.organization).trim();
 
-      if (!settings.sentry.authToken || !settings.sentry.organization || !settings.sentry.project) {
-        throw new Error('Sentry credentials not configured. Please add auth token, organization, and project in Settings.');
+      if (!authToken || !organization) {
+        throw new Error('Sentry credentials required. Please provide auth token and organization.');
       }
 
       // Load the dashboard JSON
@@ -79,58 +98,107 @@ export class SentryAPIService {
       // Prepare dashboard payload for Sentry API
       const payload = {
         title: dashboardTitle || dashboardJson.title || `${project.project.name} - Performance Dashboard`,
-        widgets: dashboardJson.widgets.map((widget: any) => ({
-          title: widget.title,
-          displayType: widget.displayType || widget.type,
-          queries: [
-            {
-              fields: this.extractFieldsFromQuery(widget.query),
-              aggregates: this.extractAggregatesFromQuery(widget.query),
-              columns: this.extractColumnsFromQuery(widget.query),
-              conditions: this.extractConditionsFromQuery(widget.query),
-              orderby: widget.interval || '-time',
-              name: widget.title
-            }
-          ],
-          widgetType: widget.widgetType || 'discover',
-          interval: widget.interval || '5m',
-          layout: widget.layout || null
-        }))
+        widgets: dashboardJson.widgets.map((widget: any) => {
+          // If widget already has queries array (new format), use it directly
+          if (widget.queries && Array.isArray(widget.queries)) {
+            return {
+              title: widget.title,
+              description: widget.description || null,
+              displayType: widget.displayType || 'area',
+              widgetType: widget.widgetType || 'spans',
+              interval: widget.interval || '1h',
+              limit: widget.limit || 10, // Required by Sentry API, max is 10
+              queries: widget.queries.map((q: any) => ({
+                fields: q.fields || [],
+                aggregates: q.aggregates || [],
+                columns: q.columns || [],
+                conditions: q.conditions || '',
+                orderby: q.orderby || '',
+                name: q.name || widget.title
+              })),
+              layout: widget.layout || null
+            };
+          }
+
+          // Legacy format: extract from widget.query string
+          return {
+            title: widget.title,
+            displayType: widget.displayType || widget.type,
+            widgetType: widget.widgetType || 'spans',
+            interval: widget.interval || '1h',
+            limit: widget.limit || 10, // Required by Sentry API, max is 10
+            queries: [
+              {
+                fields: this.extractFieldsFromQuery(widget.query),
+                aggregates: this.extractAggregatesFromQuery(widget.query),
+                columns: this.extractColumnsFromQuery(widget.query),
+                conditions: this.extractConditionsFromQuery(widget.query) || 'is_transaction:true',
+                orderby: '',
+                name: widget.title
+              }
+            ],
+            layout: widget.layout || null
+          };
+        })
       };
 
       console.log('Creating dashboard in Sentry...');
-      console.log(`Organization: ${settings.sentry.organization}`);
-      console.log(`Project: ${settings.sentry.project}`);
+      console.log(`Organization: ${organization}`);
+      console.log(`Auth token length: ${authToken.length}`);
+      console.log(`Auth token has spaces: ${authToken.includes(' ')}`);
+      console.log(`Auth token first 10 chars: ${authToken.substring(0, 10)}`);
 
-      // Create dashboard via Sentry API
-      const response = await fetch(
-        `${SENTRY_API_BASE}/organizations/${settings.sentry.organization}/dashboards/`,
-        {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${settings.sentry.authToken}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(payload)
+      // Determine API base - try custom instance first
+      const apiBase = getSentryApiBase(organization);
+      console.log(`Using API base: ${apiBase}`);
+      console.log(`Uploading ${payload.widgets.length} widgets...`);
+
+      // Create dashboard via Sentry API with timeout
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+
+      let response;
+      try {
+        console.log('[SENTRY] Starting fetch request...');
+        response = await fetch(
+          `${apiBase}/organizations/${organization}/dashboards/`,
+          {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${authToken}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload),
+            signal: controller.signal
+          }
+        );
+        clearTimeout(timeoutId);
+        console.log(`[SENTRY] Got response: ${response.status}`);
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error('[SENTRY] API error:', errorText);
+          throw new Error(`Failed to create dashboard: ${response.status} ${errorText}`);
         }
-      );
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error('Sentry API error:', errorText);
-        throw new Error(`Failed to create dashboard: ${response.status} ${errorText}`);
+        const result = await response.json();
+        console.log('[SENTRY] ✅ Dashboard created successfully, ID:', result.id);
+
+        // Construct dashboard URL (use custom instance format)
+        const dashboardUrl = `https://${organization}.sentry.io/organizations/${organization}/dashboard/${result.id}/`;
+
+        return {
+          success: true,
+          dashboardUrl
+        };
+      } catch (fetchError: any) {
+        clearTimeout(timeoutId);
+        console.error('[SENTRY] Fetch error:', fetchError);
+        if (fetchError.name === 'AbortError') {
+          throw new Error('Dashboard upload timed out after 30 seconds. Please try again.');
+        }
+        throw fetchError;
       }
-
-      const result = await response.json();
-      console.log('✅ Dashboard created successfully');
-
-      // Construct dashboard URL
-      const dashboardUrl = `https://sentry.io/organizations/${settings.sentry.organization}/dashboard/${result.id}/`;
-
-      return {
-        success: true,
-        dashboardUrl
-      };
     } catch (error) {
       console.error('Error creating dashboard in Sentry:', error);
       return {
@@ -219,8 +287,9 @@ export class SentryAPIService {
         throw new Error('Sentry credentials not configured');
       }
 
+      const apiBase = getSentryApiBase(settings.sentry.organization);
       const response = await fetch(
-        `${SENTRY_API_BASE}/organizations/${settings.sentry.organization}/dashboards/`,
+        `${apiBase}/organizations/${settings.sentry.organization}/dashboards/`,
         {
           headers: {
             'Authorization': `Bearer ${settings.sentry.authToken}`,

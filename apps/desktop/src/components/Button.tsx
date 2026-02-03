@@ -18,11 +18,11 @@ export default function Button({
   return (
     <button
       className={clsx(
-        'font-semibold rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed',
+        'font-semibold rounded-lg transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed',
         {
-          'bg-sentry-purple hover:bg-sentry-purple/90 text-white': variant === 'primary',
-          'bg-gray-200 hover:bg-gray-300 text-gray-800': variant === 'secondary',
-          'bg-red-600 hover:bg-red-700 text-white': variant === 'danger',
+          'bg-sentry-gradient hover:shadow-sentry text-white hover:scale-105': variant === 'primary',
+          'bg-sentry-background-secondary hover:bg-sentry-background-tertiary text-white border border-sentry-border': variant === 'secondary',
+          'bg-sentry-pink hover:bg-sentry-pink-dark text-white hover:shadow-lg': variant === 'danger',
           'px-3 py-1.5 text-sm': size === 'small' || size === 'sm',
           'px-4 py-2 text-base': size === 'md',
           'px-6 py-3 text-lg': size === 'lg',

@@ -53,24 +53,9 @@ SENTRY_ENVIRONMENT=${config.environment}
       fs.writeFileSync(envPath, envContent);
       onOutput('✓ Configuration saved\n\n');
 
-      // Always install/upgrade dependencies to ensure they're available
-      const requirementsPath = path.join(outputPath, 'requirements.txt');
-      if (fs.existsSync(requirementsPath)) {
-        onOutput('📦 Installing Python dependencies...\n');
-        onOutput('(This may take a minute on first run)\n\n');
-        
-        // Install dependencies with better error handling
-        const installSuccess = await this.installDependenciesRobust(pythonCommand, outputPath, onOutput, onError);
-        
-        if (!installSuccess) {
-          return { 
-            success: false, 
-            error: 'Failed to install Python dependencies. Please check the output above for details.' 
-          };
-        }
-        
-        onOutput('\n✅ All dependencies ready!\n\n');
-      }
+      // Skip dependency installation - assume they're already installed
+      // User can manually run: pip3 install -r requirements.txt if needed
+      onOutput('⏭️  Skipping dependency check...\n');
 
       // Run the Python script
       return new Promise((resolve) => {

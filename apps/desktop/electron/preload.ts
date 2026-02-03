@@ -109,7 +109,7 @@ const electronAPI: IElectronAPI = {
 
   // Sentry API
   verifySentryConnection: () => ipcRenderer.invoke('sentry:verify-connection'),
-  createSentryDashboard: (projectId, dashboardTitle) => ipcRenderer.invoke('sentry:create-dashboard', projectId, dashboardTitle),
+  createSentryDashboard: (projectId, dashboardTitle, credentials) => ipcRenderer.invoke('sentry:create-dashboard', projectId, dashboardTitle, credentials),
   listSentryDashboards: () => ipcRenderer.invoke('sentry:list-dashboards'),
 
   // File system

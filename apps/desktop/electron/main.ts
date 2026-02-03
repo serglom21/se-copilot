@@ -1,3 +1,12 @@
+import * as Sentry from '@sentry/electron/main';
+
+// Initialize Sentry at the very top
+Sentry.init({
+  dsn: 'https://9274b811affb135097d7c3e83cef7508@o4510819177529344.ingest.us.sentry.io/4510819184803840',
+  tracesSampleRate: 1.0,
+  environment: process.env.NODE_ENV || 'production',
+});
+
 import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -192,8 +201,8 @@ function setupIpcHandlers() {
     return sentryAPIService.verifyConnection();
   });
 
-  ipcMain.handle('sentry:create-dashboard', async (_, projectId: string, dashboardTitle?: string) => {
-    return sentryAPIService.createDashboard(projectId, dashboardTitle);
+  ipcMain.handle('sentry:create-dashboard', async (_, projectId: string, dashboardTitle?: string, credentials?: { authToken: string; organization: string }) => {
+    return sentryAPIService.createDashboard(projectId, dashboardTitle, credentials);
   });
 
   ipcMain.handle('sentry:list-dashboards', async () => {

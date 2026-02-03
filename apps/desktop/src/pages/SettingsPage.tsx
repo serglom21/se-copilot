@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import * as Sentry from '@sentry/react';
 import Button from '../components/Button';
 import { Input } from '../components/Input';
 
@@ -57,18 +58,22 @@ export default function SettingsPage() {
   };
 
   if (loading) {
-    return <div className="p-8">Loading...</div>;
+    return <div className="p-8 text-white">Loading...</div>;
   }
 
   return (
     <div className="p-8 max-w-4xl mx-auto">
-      <h1 className="text-3xl font-bold text-gray-900 mb-2">Settings</h1>
-      <p className="text-gray-600 mb-8">Configure your SE Copilot preferences</p>
+      <div className="mb-8">
+        <h1 className="text-4xl font-bold text-white mb-2">Settings</h1>
+        <p className="text-gray-400 text-lg">Configure your SE Copilot preferences</p>
+      </div>
 
       <div className="space-y-6">
         {/* LLM Settings */}
-        <div className="bg-white rounded-lg border border-gray-200 p-6">
-          <h2 className="text-xl font-semibold text-gray-900 mb-4">LLM Configuration</h2>
+        <div className="card p-6">
+          <h2 className="text-2xl font-semibold text-white mb-4 flex items-center gap-2">
+            <span className="text-2xl">🤖</span> LLM Configuration
+          </h2>
           <div className="space-y-4">
             <Input
               label="API Base URL"
@@ -98,21 +103,23 @@ export default function SettingsPage() {
                 llm: { ...settings.llm, model: e.target.value }
               })}
             />
-            <div className="bg-blue-50 p-4 rounded-lg text-sm text-blue-800">
-              <strong>Note:</strong> You can use any OpenAI-compatible API endpoint (OpenAI, Azure OpenAI, or other compatible providers).
+            <div className="bg-blue-900/20 p-4 rounded-lg text-sm text-blue-300 border border-blue-700/50">
+              <strong className="text-blue-100">Note:</strong> You can use any OpenAI-compatible API endpoint (OpenAI, Azure OpenAI, or other compatible providers).
             </div>
           </div>
         </div>
 
         {/* GitHub Settings */}
-        <div className="bg-white rounded-lg border border-gray-200 p-6">
-          <h2 className="text-xl font-semibold text-gray-900 mb-4">GitHub Configuration</h2>
+        <div className="card p-6">
+          <h2 className="text-2xl font-semibold text-white mb-4 flex items-center gap-2">
+            <span className="text-2xl">🐙</span> GitHub Configuration
+          </h2>
           <div className="space-y-4">
             {settings.github.username ? (
-              <div className="bg-green-50 p-4 rounded-lg">
+              <div className="bg-green-900/20 p-4 rounded-lg border border-green-700/50">
                 <div className="flex items-center justify-between">
                   <div>
-                    <div className="text-sm font-medium text-green-800">
+                    <div className="text-sm font-semibold text-green-100">
                       ✓ Connected as @{settings.github.username}
                     </div>
                   </div>
@@ -163,11 +170,11 @@ export default function SettingsPage() {
                     Verify Token
                   </Button>
                 )}
-                <div className="bg-yellow-50 p-4 rounded-lg text-sm text-yellow-800">
-                  <strong>Setup Instructions:</strong>
+                <div className="bg-yellow-900/20 p-4 rounded-lg text-sm text-yellow-300 border border-yellow-700/50">
+                  <strong className="text-yellow-100">Setup Instructions:</strong>
                   <ol className="list-decimal list-inside mt-2 space-y-1">
-                    <li>Go to <a href="https://github.com/settings/tokens/new" target="_blank" className="underline">GitHub Token Settings</a></li>
-                    <li>Create a token with <code className="bg-yellow-100 px-1 rounded">repo</code> scope</li>
+                    <li>Go to <a href="https://github.com/settings/tokens/new" target="_blank" className="text-yellow-100 underline hover:text-yellow-200">GitHub Token Settings</a></li>
+                    <li>Create a token with <code className="bg-yellow-800/50 px-2 py-0.5 rounded text-yellow-100">repo</code> scope</li>
                     <li>Paste the token above and click "Verify Token"</li>
                     <li>Save settings</li>
                   </ol>
@@ -178,8 +185,10 @@ export default function SettingsPage() {
         </div>
 
         {/* Sentry API Settings */}
-        <div className="bg-white rounded-lg border border-gray-200 p-6">
-          <h2 className="text-xl font-semibold text-gray-900 mb-4">Sentry API Configuration</h2>
+        <div className="card p-6">
+          <h2 className="text-2xl font-semibold text-white mb-4 flex items-center gap-2">
+            <span className="text-2xl">🔮</span> Sentry API Configuration
+          </h2>
           <div className="space-y-4">
             <Input
               label="Auth Token"
@@ -228,14 +237,14 @@ export default function SettingsPage() {
                 Verify Connection
               </Button>
             )}
-            <div className="bg-purple-50 p-4 rounded-lg text-sm text-purple-800">
-              <strong>Setup Instructions:</strong>
+            <div className="bg-sentry-purple-900/20 p-4 rounded-lg text-sm text-sentry-purple-300 border border-sentry-purple-700/50">
+              <strong className="text-sentry-purple-100">Setup Instructions:</strong>
               <ol className="list-decimal list-inside mt-2 space-y-1">
-                <li>Go to <a href="https://sentry.io/settings/account/api/auth-tokens/" target="_blank" rel="noopener noreferrer" className="underline">Sentry Auth Tokens</a></li>
-                <li>Create a token with <code className="bg-purple-100 px-1 rounded">org:read</code> and <code className="bg-purple-100 px-1 rounded">project:write</code> scopes</li>
+                <li>Go to <a href="https://sentry.io/settings/account/api/auth-tokens/" target="_blank" rel="noopener noreferrer" className="text-sentry-purple-100 underline hover:text-sentry-purple-200">Sentry Auth Tokens</a></li>
+                <li>Create a token with <code className="bg-sentry-purple-800/50 px-2 py-0.5 rounded text-sentry-purple-100">org:read</code> and <code className="bg-sentry-purple-800/50 px-2 py-0.5 rounded text-sentry-purple-100">project:write</code> scopes</li>
                 <li>Paste the token above</li>
-                <li>Enter your organization slug (from your Sentry URL: sentry.io/organizations/<strong>org-slug</strong>/)</li>
-                <li>Enter your project slug (from your Sentry URL: sentry.io/organizations/org-slug/projects/<strong>project-slug</strong>/)</li>
+                <li>Enter your organization slug (from your Sentry URL: sentry.io/organizations/<strong className="text-sentry-purple-100">org-slug</strong>/)</li>
+                <li>Enter your project slug (from your Sentry URL: sentry.io/organizations/org-slug/projects/<strong className="text-sentry-purple-100">project-slug</strong>/)</li>
                 <li>Click "Verify Connection" to test</li>
                 <li>Save settings</li>
               </ol>
@@ -244,13 +253,70 @@ export default function SettingsPage() {
         </div>
 
         {/* Save Button */}
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-4 pt-4">
           <Button onClick={handleSave} size="lg">
-            Save Settings
+            <span className="mr-2">💾</span> Save Settings
           </Button>
           {saved && (
-            <span className="text-green-600 font-medium">✓ Settings saved</span>
+            <span className="text-green-400 font-semibold flex items-center gap-2">
+              <span className="text-xl">✓</span> Settings saved
+            </span>
           )}
+        </div>
+
+        {/* Sentry Testing */}
+        <div className="card p-6">
+          <h2 className="text-2xl font-semibold text-white mb-4 flex items-center gap-2">
+            <span className="text-2xl">🔮</span> Sentry Testing
+          </h2>
+          <div className="space-y-4">
+            <div className="bg-blue-900/20 p-4 rounded-lg text-sm text-blue-300 border border-blue-700/50">
+              <p className="font-semibold text-blue-100 mb-2">Test Sentry Integration</p>
+              <p>Click the buttons below to test that Sentry is properly capturing errors and events from SE Copilot.</p>
+            </div>
+
+            <div className="flex gap-3 flex-wrap">
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  Sentry.captureMessage('Test message from SE Copilot Settings', 'info');
+                  alert('✅ Test message sent to Sentry! Check your Sentry dashboard.');
+                }}
+              >
+                📤 Send Test Message
+              </Button>
+              <Button
+                variant="danger"
+                onClick={() => {
+                  try {
+                    throw new Error('Test error from SE Copilot Settings');
+                  } catch (error) {
+                    Sentry.captureException(error);
+                    alert('✅ Test error sent to Sentry! Check your Sentry dashboard.');
+                  }
+                }}
+              >
+                ⚠️ Trigger Test Error
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  const transaction = Sentry.startTransaction({
+                    name: 'Test Transaction',
+                    op: 'test',
+                  });
+
+                  setTimeout(() => {
+                    transaction.setStatus('ok');
+                    transaction.finish();
+                    alert('✅ Test transaction sent to Sentry! Check your Performance page.');
+                  }, 500);
+                }}
+              >
+                🚀 Test Performance
+              </Button>
+            </div>
+          </div>
         </div>
       </div>
     </div>

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import * as Sentry from '@sentry/react';
 import { useProjectStore } from '../store/project-store';
 import Button from '../components/Button';
 import { Input, Textarea, Select } from '../components/Input';
@@ -65,9 +66,23 @@ export default function NewProjectPage() {
     }
 
     setLoading(true);
+
+    // Start Sentry transaction for project creation
+    const transaction = Sentry.startTransaction({
+      name: 'Create Project',
+      op: 'user.action',
+    });
+
     try {
       const slug = formData.name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-      
+
+      // Track project metadata
+      Sentry.setContext('project', {
+        vertical: formData.vertical,
+        stackType: formData.stackType,
+        backendFramework: formData.backendFramework,
+      });
+
       const project = await createProject({
         project: {
           name: formData.name,
@@ -96,8 +111,13 @@ export default function NewProjectPage() {
         status: 'draft'
       });
 
+      transaction.setStatus('ok');
+      transaction.finish();
       navigate(`/project/${project.id}/plan`);
     } catch (error) {
+      transaction.setStatus('internal_error');
+      transaction.finish();
+      Sentry.captureException(error);
       setErrors({ submit: String(error) });
     } finally {
       setLoading(false);
@@ -106,10 +126,12 @@ export default function NewProjectPage() {
 
   return (
     <div className="p-8 max-w-2xl mx-auto">
-      <h1 className="text-3xl font-bold text-gray-900 mb-2">New Project</h1>
-      <p className="text-gray-600 mb-8">Create a new Sentry demo project</p>
+      <div className="mb-8">
+        <h1 className="text-4xl font-bold text-white mb-2">New Project</h1>
+        <p className="text-gray-400 text-lg">Create a new Sentry demo project</p>
+      </div>
 
-      <form onSubmit={handleSubmit} className="bg-white rounded-lg border border-gray-200 p-6 space-y-6">
+      <form onSubmit={handleSubmit} className="card p-8 space-y-6">
         <Input
           label="Project Name *"
           placeholder="My Customer Demo"
@@ -149,14 +171,14 @@ export default function NewProjectPage() {
           error={errors.customerWebsite}
         />
 
-        <div className="bg-blue-50 p-4 rounded-lg border border-blue-200 -mt-3">
-          <div className="flex items-start gap-2">
-            <span className="text-blue-600 text-lg">ℹ️</span>
-            <div className="text-sm text-blue-900">
-              <p className="font-medium mb-1">How we use this information</p>
-              <p className="text-blue-800">
+        <div className="bg-blue-900/20 p-4 rounded-lg border border-blue-700/50 -mt-3">
+          <div className="flex items-start gap-3">
+            <span className="text-blue-400 text-xl">ℹ️</span>
+            <div className="text-sm text-blue-200">
+              <p className="font-semibold mb-1 text-blue-100">How we use this information</p>
+              <p className="text-blue-300">
                 We'll analyze the website to provide specific performance metrics recommendations
-                tailored to your customer's use case. <strong>Company names and branding will never
+                tailored to your customer's use case. <strong className="text-blue-100">Company names and branding will never
                 appear in generated code</strong> – all examples remain abstract and generic.
               </p>
             </div>
@@ -164,9 +186,9 @@ export default function NewProjectPage() {
         </div>
 
         {formData.stackType === 'web' && (
-          <div className="bg-blue-50 p-4 rounded-lg border border-blue-200">
-            <h3 className="font-semibold text-blue-900 mb-2">Web Stack Details</h3>
-            <div className="space-y-1 text-sm text-blue-800">
+          <div className="bg-blue-900/20 p-4 rounded-lg border border-blue-700/50">
+            <h3 className="font-semibold text-blue-100 mb-2">🌐 Web Stack Details</h3>
+            <div className="space-y-1 text-sm text-blue-300">
               <div>✓ Frontend: Next.js (React framework)</div>
               <div>✓ Backend: Express (Node.js)</div>
               <div>✓ Deployment: Local dev servers</div>
@@ -175,9 +197,9 @@ export default function NewProjectPage() {
         )}
 
         {formData.stackType === 'mobile' && (
-          <div className="bg-purple-50 p-4 rounded-lg border border-purple-200">
-            <h3 className="font-semibold text-purple-900 mb-2">Mobile Stack Details</h3>
-            <div className="space-y-1 text-sm text-purple-800">
+          <div className="bg-sentry-purple-900/20 p-4 rounded-lg border border-sentry-purple-700/50">
+            <h3 className="font-semibold text-sentry-purple-100 mb-2">📱 Mobile Stack Details</h3>
+            <div className="space-y-1 text-sm text-sentry-purple-300">
               <div>✓ Frontend: React Native (Expo)</div>
               <div>✓ Backend: Express (Node.js)</div>
               <div>✓ Deployment: Expo Snack (browser simulator)</div>
@@ -186,9 +208,9 @@ export default function NewProjectPage() {
         )}
 
         {formData.stackType === 'backend-only' && (
-          <div className="bg-green-50 p-4 rounded-lg border border-green-200">
-            <h3 className="font-semibold text-green-900 mb-2">Python Backend Details</h3>
-            <div className="space-y-1 text-sm text-green-800">
+          <div className="bg-green-900/20 p-4 rounded-lg border border-green-700/50">
+            <h3 className="font-semibold text-green-100 mb-2">🐍 Python Backend Details</h3>
+            <div className="space-y-1 text-sm text-green-300">
               <div>✓ Framework: {formData.backendFramework === 'fastapi' ? 'FastAPI (modern, async)' : 'Flask (lightweight)'}</div>
               <div>✓ Features: RESTful API, Sentry instrumentation, auto-docs</div>
               <div>✓ Deployment: Local dev server (uvicorn/flask)</div>
@@ -205,7 +227,7 @@ export default function NewProjectPage() {
         />
 
         {errors.submit && (
-          <div className="bg-red-50 text-red-800 p-3 rounded-lg text-sm">
+          <div className="bg-sentry-pink/20 text-sentry-pink-light p-4 rounded-lg text-sm border border-sentry-pink/50 font-medium">
             {errors.submit}
           </div>
         )}
