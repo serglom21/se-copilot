@@ -19,7 +19,14 @@ export default defineConfig({
             minify: false,
             outDir: 'dist-electron',
             rollupOptions: {
-              external: ['electron', 'better-sqlite3', 'simple-git']
+              external: [
+                'electron', 
+                'better-sqlite3', 
+                'simple-git',
+                'puppeteer',
+                'bufferutil',
+                'utf-8-validate'
+              ]
             }
           }
         }

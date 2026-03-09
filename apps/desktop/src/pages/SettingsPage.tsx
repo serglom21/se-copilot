@@ -300,17 +300,14 @@ export default function SettingsPage() {
               </Button>
               <Button
                 variant="secondary"
-                onClick={() => {
-                  const transaction = Sentry.startTransaction({
-                    name: 'Test Transaction',
-                    op: 'test',
-                  });
-
-                  setTimeout(() => {
-                    transaction.setStatus('ok');
-                    transaction.finish();
-                    alert('✅ Test transaction sent to Sentry! Check your Performance page.');
-                  }, 500);
+                onClick={async () => {
+                  await Sentry.startSpan(
+                    { name: 'Test Transaction', op: 'test' },
+                    async () => {
+                      await new Promise(resolve => setTimeout(resolve, 500));
+                    }
+                  );
+                  alert('✅ Test transaction sent to Sentry! Check your Performance page.');
                 }}
               >
                 🚀 Test Performance

@@ -5,10 +5,13 @@ import Button from '../components/Button';
 import { Input } from '../components/Input';
 import TroubleshootingChat from '../components/TroubleshootingChat';
 
+type GeneratorMode = 'script' | 'live';
+
 export default function DataGeneratorPage() {
   const { projectId } = useParams<{ projectId: string }>();
   const { currentProject, loadProject } = useProjectStore();
   
+  const [mode, setMode] = useState<GeneratorMode>('live');
   const [config, setConfig] = useState({
     frontendDsn: '',
     backendDsn: '',
@@ -63,10 +66,19 @@ export default function DataGeneratorPage() {
     }
 
     setRunning(true);
-    setOutput(['🚀 Initializing data generation...\n\n']);
+    setErrors([]);
+    
+    if (mode === 'live') {
+      setOutput(['🎭 Starting Live Data Generator...\n']);
+      setOutput(prev => [...prev, '   This will run your actual app with Puppeteer\n\n']);
+    } else {
+      setOutput(['🚀 Initializing Python script data generation...\n\n']);
+    }
 
     try {
-      const result = await window.electronAPI.runDataGenerator(projectId, config);
+      const result = mode === 'live'
+        ? await window.electronAPI.runLiveDataGenerator(projectId, config)
+        : await window.electronAPI.runDataGenerator(projectId, config);
       
       if (result.success) {
         setOutput(prev => [...prev, '\n✅ Complete! Check your Sentry dashboard.\n']);
@@ -78,6 +90,14 @@ export default function DataGeneratorPage() {
     } catch (error) {
       setOutput(prev => [...prev, `\n❌ Error: ${error}\n`]);
     } finally {
+      setRunning(false);
+    }
+  };
+
+  const handleStop = async () => {
+    if (mode === 'live') {
+      await window.electronAPI.stopLiveDataGenerator();
+      setOutput(prev => [...prev, '\n⏹️ Stopped by user\n']);
       setRunning(false);
     }
   };
@@ -96,7 +116,9 @@ export default function DataGeneratorPage() {
       <div className="p-6 border-b border-gray-200">
         <h1 className="text-3xl font-bold text-gray-900 mb-2">Run Data Generator</h1>
         <p className="text-gray-600">
-          Generate realistic test data to populate your Sentry dashboard
+          {mode === 'live' 
+            ? 'Generate realistic test data using the actual SDKs with connected distributed traces'
+            : 'Generate test data using Python script simulation'}
         </p>
       </div>
 
@@ -104,6 +126,35 @@ export default function DataGeneratorPage() {
         {/* Left: Configuration */}
         <div className="w-1/2 border-r border-gray-200 p-6 overflow-y-auto">
           <h2 className="text-xl font-semibold mb-4">Configuration</h2>
+
+          {/* Mode Toggle */}
+          <div className="mb-6">
+            <label className="block text-sm font-medium text-gray-700 mb-2">Generation Mode</label>
+            <div className="flex rounded-lg border border-gray-300 overflow-hidden">
+              <button
+                onClick={() => setMode('live')}
+                className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
+                  mode === 'live'
+                    ? 'bg-purple-600 text-white'
+                    : 'bg-white text-gray-700 hover:bg-gray-50'
+                }`}
+              >
+                🎭 Live Mode
+                <span className="block text-xs mt-0.5 opacity-80">Real SDK instrumentation</span>
+              </button>
+              <button
+                onClick={() => setMode('script')}
+                className={`flex-1 px-4 py-3 text-sm font-medium transition-colors border-l border-gray-300 ${
+                  mode === 'script'
+                    ? 'bg-purple-600 text-white'
+                    : 'bg-white text-gray-700 hover:bg-gray-50'
+                }`}
+              >
+                🐍 Script Mode
+                <span className="block text-xs mt-0.5 opacity-80">Python simulation</span>
+              </button>
+            </div>
+          </div>
 
           <div className="space-y-4 mb-6">
             <Input
@@ -146,35 +197,81 @@ export default function DataGeneratorPage() {
             />
           </div>
 
-          <div className="bg-blue-50 p-4 rounded-lg text-sm text-blue-800 mb-6">
-            <strong>What will be generated:</strong>
-            <ul className="list-disc list-inside mt-2 space-y-1">
-              <li>{currentProject.instrumentation.spans.filter(s => s.layer === 'frontend').length} frontend custom spans</li>
-              <li>{currentProject.instrumentation.spans.filter(s => s.layer === 'backend').length} backend custom spans</li>
-              <li>Realistic attributes with fake data</li>
-              <li>PII automatically redacted</li>
-              <li>Variety of success/error outcomes</li>
-            </ul>
-          </div>
+          {mode === 'live' ? (
+            <>
+              <div className="bg-green-50 p-4 rounded-lg text-sm text-green-800 mb-6">
+                <strong>🎭 Live Mode Benefits:</strong>
+                <ul className="list-disc list-inside mt-2 space-y-1">
+                  <li>Real SDK automatic instrumentation (Web Vitals, LCP, etc.)</li>
+                  <li>Connected distributed traces (FE ↔ BE)</li>
+                  <li>Authentic span waterfall with SDK spans</li>
+                  <li>Your custom spans nested in real transactions</li>
+                  <li>Always uses latest SDK instrumentation</li>
+                </ul>
+              </div>
 
-          <div className="bg-yellow-50 p-4 rounded-lg text-sm text-yellow-800 mb-6">
-            <strong>Requirements:</strong>
-            <ul className="list-disc list-inside mt-2 space-y-1">
-              <li>Python 3.7+ installed</li>
-              <li>Script generated (click Generate Data Script first)</li>
-              <li>Valid Sentry DSN(s)</li>
-            </ul>
-          </div>
+              <div className="bg-yellow-50 p-4 rounded-lg text-sm text-yellow-800 mb-6">
+                <strong>Requirements:</strong>
+                <ul className="list-disc list-inside mt-2 space-y-1">
+                  <li>Reference app generated</li>
+                  <li>Node.js installed (for frontend/backend)</li>
+                  <li>Valid Sentry DSN(s)</li>
+                </ul>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="bg-blue-50 p-4 rounded-lg text-sm text-blue-800 mb-6">
+                <strong>What will be generated:</strong>
+                <ul className="list-disc list-inside mt-2 space-y-1">
+                  <li>{currentProject.instrumentation.spans.filter(s => s.layer === 'frontend').length} frontend custom spans</li>
+                  <li>{currentProject.instrumentation.spans.filter(s => s.layer === 'backend').length} backend custom spans</li>
+                  <li>Realistic attributes with fake data</li>
+                  <li>PII automatically redacted</li>
+                  <li>Variety of success/error outcomes</li>
+                </ul>
+              </div>
+
+              <div className="bg-yellow-50 p-4 rounded-lg text-sm text-yellow-800 mb-6">
+                <strong>Requirements:</strong>
+                <ul className="list-disc list-inside mt-2 space-y-1">
+                  <li>Python 3.7+ installed</li>
+                  <li>Script generated (click Generate Data Script first)</li>
+                  <li>Valid Sentry DSN(s)</li>
+                </ul>
+              </div>
+
+              <div className="bg-orange-50 p-4 rounded-lg text-sm text-orange-800 mb-6">
+                <strong>⚠️ Limitations:</strong>
+                <ul className="list-disc list-inside mt-2 space-y-1">
+                  <li>No SDK automatic instrumentation</li>
+                  <li>FE/BE traces are not connected</li>
+                  <li>Missing Web Vitals and performance metrics</li>
+                </ul>
+              </div>
+            </>
+          )}
 
           <div className="space-y-3">
-            <Button 
-              onClick={handleRun} 
-              disabled={running}
-              size="lg"
-              className="w-full"
-            >
-              {running ? '⏳ Generating Data...' : '🚀 Run Data Generator'}
-            </Button>
+            {running ? (
+              <Button 
+                onClick={handleStop} 
+                variant="secondary"
+                size="lg"
+                className="w-full"
+              >
+                ⏹️ Stop Generator
+              </Button>
+            ) : (
+              <Button 
+                onClick={handleRun} 
+                disabled={running}
+                size="lg"
+                className="w-full"
+              >
+                {mode === 'live' ? '🎭 Run Live Generator' : '🐍 Run Script Generator'}
+              </Button>
+            )}
 
             {(errors.length > 0 || output.length > 0) && (
               <Button 

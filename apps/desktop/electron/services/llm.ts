@@ -325,34 +325,14 @@ export class LLMService {
     }
 
     let stackDescription: string;
-    let exampleSpans: string;
 
     if (project.stack.type === 'backend-only') {
       const framework = project.stack.backend === 'flask' ? 'Flask' : 'FastAPI';
       stackDescription = `- Backend: ${framework} (Python)`;
-      exampleSpans = `Examples for Python backend:
-- db.query_users
-- cache.redis_get
-- api.endpoint_process
-- payment.stripe_charge
-- email.sendgrid_send
-- external.http_call
-- data.transform
-- file.s3_upload`;
     } else if (project.stack.type === 'mobile') {
       stackDescription = `- Frontend: React Native (Expo)\n- Backend: Express`;
-      exampleSpans = `Examples for mobile:
-- navigation.screen_load
-- ui.button_press
-- api.fetch_products
-- auth.login
-- sensor.camera_capture`;
     } else {
       stackDescription = `- Frontend: Next.js\n- Backend: Express`;
-      exampleSpans = `Examples for web:
-- checkout.validate_cart
-- payment.process
-- cart.addProduct`;
     }
 
     // Analyze website if provided
@@ -489,7 +469,19 @@ INSTRUCTIONS:
    - Include 3-5 contextual attributes per span
    - Focus on operations specific to this use case
 
-Generate 8-12 spans that are SPECIFIC to this project's domain and requirements.`
+CRITICAL SCOPING RULE:
+Generate spans ONLY for operations that are directly described by the project name and requirements.
+- If the project is named "Signup" → instrument the signup/registration flow only. Do NOT add checkout, payment, or cart spans.
+- If the project is named "Checkout" → instrument the checkout flow only. Do NOT add signup or auth spans.
+- The project name is the primary signal for scope. The industry vertical tells you the domain context, NOT the full feature set to instrument.
+- When requirements are sparse, default to a narrow interpretation of the project name rather than expanding to the full vertical.
+
+SPAN QUALITY RULES:
+- Generate EXACTLY 4-6 spans. No more. Quality over quantity.
+- DO NOT generate micro-UI-event spans. The following are explicitly forbidden: focus, blur, keydown, keyup, click, scroll, hover, mouseover, input, render, mount, unmount, animation, and any other browser/DOM event.
+- Each span must represent a meaningful BUSINESS or NETWORK operation: submitting a form, validating credentials, creating an account, processing a payment, sending an email, querying a database.
+- All span names must be UNIQUE. No duplicate names.
+- Prefer backend operations for clear FE→BE tracing: submit, validate, create, process, send, save, fetch, query.`
       }
     ];
 
@@ -638,10 +630,10 @@ Return ONLY valid JSON.`
       let jsonText = response.trim();
       if (jsonText.startsWith('```')) {
         jsonText = jsonText.replace(/^```(?:json)?\n?/, '');
-        jsonText = jsonText.replace(/\n?```$/, '');
+        jsonText = jsonText.replace(/\n?```[\s\S]*$/, '');
         jsonText = jsonText.trim();
       }
-      
+
       const parsed = JSON.parse(jsonText);
       return Array.isArray(parsed) ? parsed : [];
     } catch (error) {
@@ -741,10 +733,36 @@ Focus on practical, domain-specific instrumentation that helps identify real per
       throw new Error('LLM settings not configured');
     }
 
-    const instrumentationDetails = project.instrumentation.spans
-      .filter(s => s.layer === 'frontend')
-      .map(span => `- ${span.name} (${span.op}): ${span.description}\n  Attributes: ${Object.keys(span.attributes).join(', ') || 'none'}`)
+    // Include ALL spans — frontend pages call backend spans too (distributed tracing)
+    const allSpansList = project.instrumentation.spans;
+    const instrumentationDetails = allSpansList
+      .map(span => `- Function: trace_${span.name.replace(/\./g, '_')}\n  Span: ${span.name} (${span.op}): ${span.description}\n  Attributes: ${Object.keys(span.attributes).join(', ') || 'none'}`)
       .join('\n');
+
+    // Build a dynamic code example from the project's actual first span (any layer)
+    const firstSpan = allSpansList[0];
+    const exampleSpanFn = firstSpan
+      ? `trace_${firstSpan.name.replace(/\./g, '_')}`
+      : 'trace_main_operation';
+    const exampleAttrKey = firstSpan && Object.keys(firstSpan.attributes).length > 0
+      ? Object.keys(firstSpan.attributes)[0]
+      : 'item_count';
+
+    // Derive API endpoints using /${namespace}/${action} pattern — must match backend route generation
+    const deriveApiEndpoint = (spanName: string): string => {
+      const parts = spanName.split('.');
+      if (parts.length === 1) return `/${parts[0].replace(/_/g, '-')}`;
+      const namespace = parts[0];
+      const action = parts.slice(1).join('/').replace(/_/g, '-');
+      return `/${namespace}/${action}`;
+    };
+
+    // Build the API endpoint contract so frontend and backend agree on ALL spans
+    const apiEndpoints = allSpansList.map(s =>
+      `- trace_${s.name.replace(/\./g, '_')} → POST /api${deriveApiEndpoint(s.name)}`
+    ).join('\n');
+
+    const exampleEndpoint = firstSpan ? deriveApiEndpoint(firstSpan.name).slice(1) : 'signup/submit';
 
     const prompt = `You are an expert Next.js developer with deep knowledge of Sentry instrumentation. Generate a complete, production-ready web application based on these requirements:
 
@@ -756,12 +774,25 @@ Focus on practical, domain-specific instrumentation that helps identify real per
 **SENTRY FRONTEND INSTRUMENTATION REQUIREMENTS (MUST IMPLEMENT ALL):**
 ${instrumentationDetails}
 
+**BACKEND API ENDPOINT CONTRACT (use EXACTLY these URLs for all fetch calls):**
+${apiEndpoints || '- No frontend spans defined — derive endpoints from project requirements'}
+The backend runs at http://localhost:3001. All calls go to http://localhost:3001/api/...
+Match the endpoint path exactly as listed above for each span.
+
 **CRITICAL REQUIREMENTS:**
 1. You MUST implement EVERY span listed above using the exact span names and operations
 2. Import instrumentation functions from '@/lib/instrumentation'
 3. Use the pattern: \`import { trace_span_name } from '@/lib/instrumentation'\`
-4. Actually CALL these functions in the appropriate places
-5. Set all required attributes using the attributes parameter
+4. Actually CALL these functions in the appropriate places in the UI
+5. Set all required attributes listed for each span
+6. Use the EXACT API endpoints from the contract above — do NOT invent different route paths
+7. CRITICAL — Trace function signature: ALWAYS call as \`await traceFunc(async () => { /* work */ }, { attr: value })\`. The FIRST argument MUST be an async callback function — NEVER a string, field name, or any other type. Example WRONG: \`trace_input_focus('email', ...)\`. Example CORRECT: \`await trace_input_focus(async () => {}, { field_name: 'email' })\`
+
+**IMPORTANT — BUILD FOR THIS SPECIFIC PROJECT:**
+- Base all pages, routes, and data models on the project name, requirements, and custom spans above
+- DO NOT default to a generic e-commerce layout (products/cart/checkout) unless the project is explicitly an e-commerce store
+- The page structure, data displayed, and user interactions must reflect what "${project.project.name}" actually does
+- Let the custom spans above guide what pages and actions to build
 
 **TASK:** Generate 3-5 Next.js pages (App Router) that implement the functionality described in the customer requirements.
 
@@ -769,55 +800,39 @@ ${instrumentationDetails}
 1. Each page must be fully functional with:
    - 'use client' directive at the top
    - State management (useState, useEffect)
-   - API calls to backend (fetch to http://localhost:3001/api/...)
+   - API calls to backend using EXACTLY the URLs from the endpoint contract above
    - Sentry instrumentation using the EXACT spans listed above
    - Tailwind CSS styling
    - Loading states, error handling, empty states
    - Interactive elements (buttons, forms, cards)
-2. Use emojis for placeholder images (🎧 💻 💰 📊 🏠 🛒 ⚡ etc.)
-3. Implement the EXACT spans listed above - import them from @/lib/instrumentation
-4. Example of proper span usage:
-   \`\`\`typescript
-   import { trace_checkout_validate } from '@/lib/instrumentation';
+2. Use emojis for placeholder images/icons
+3. Implement the EXACT spans listed above — import them from @/lib/instrumentation
+4. Use Next.js App Router conventions:
+   - Home/main page: filename must be "page.tsx" (placed at the root of the app directory)
+   - Sub-pages: use SUBDIRECTORY format — e.g. "signup/page.tsx", "confirm/page.tsx", "checkout/page.tsx"
+   - NEVER use the ".page.tsx" suffix pattern (e.g. "signup.page.tsx" is WRONG)
 
-   const handleCheckout = async () => {
-     await trace_checkout_validate(async () => {
-       const response = await fetch('/api/checkout', {
-         method: 'POST',
-         body: JSON.stringify(cartData)
-       });
-       return response.json();
-     }, {
-       cart_value: totalPrice,
-       item_count: items.length
-     });
-   };
-   \`\`\`
-5. Use Next.js App Router conventions (page.tsx files)
-
-**CODE STRUCTURE EXAMPLE:**
+**CODE STRUCTURE PATTERN (adapt naming to this project — do not copy these names literally):**
 \`\`\`typescript
 'use client';
 import React, { useEffect, useState } from 'react';
 import * as Sentry from '@sentry/nextjs';
-import { trace_product_load, trace_cart_add } from '@/lib/instrumentation';
+import { ${exampleSpanFn} } from '@/lib/instrumentation';
 
-export default function ProductsPage() {
-  const [products, setProducts] = useState<any[]>([]);
+export default function ExamplePage() {
+  const [items, setItems] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    loadProducts();
-  }, []);
+  useEffect(() => { loadData(); }, []);
 
-  const loadProducts = async () => {
+  const loadData = async () => {
     setLoading(true);
     try {
-      await trace_product_load(async () => {
-        const response = await fetch('http://localhost:3001/api/products');
+      await ${exampleSpanFn}(async () => {
+        const response = await fetch('http://localhost:3001/api/${exampleEndpoint}');
         const data = await response.json();
-        setProducts(data);
-      }, { page: 'products' });
+        setItems(data);
+      }, { ${exampleAttrKey}: 0 });
     } catch (error) {
       Sentry.captureException(error);
     } finally {
@@ -825,51 +840,30 @@ export default function ProductsPage() {
     }
   };
 
-  const handleAddToCart = async (product: any) => {
-    await trace_cart_add(async () => {
-      // Add to cart logic
-    }, { product_id: product.id, price: product.price });
-  };
-
   if (loading) return <div className="flex justify-center items-center min-h-screen"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-500"></div></div>;
 
   return (
     <div className="container mx-auto px-4 py-8">
-      <h1 className="text-4xl font-bold mb-8">Products</h1>
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {products.map(product => (
-          <div key={product.id} className="bg-white rounded-lg shadow-md p-6">
-            <div className="text-5xl mb-4">{product.image}</div>
-            <h2 className="text-xl font-semibold mb-2">{product.name}</h2>
-            <p className="text-gray-600 mb-4">\${product.price}</p>
-            <button onClick={() => handleAddToCart(product)} className="w-full bg-purple-600 text-white py-2 rounded-lg hover:bg-purple-700">
-              Add to Cart
-            </button>
-          </div>
-        ))}
-      </div>
+      <h1 className="text-4xl font-bold mb-8">{/* page title based on project */}</h1>
+      {/* page content based on project domain */}
     </div>
   );
 }
 \`\`\`
 
-Return ONLY valid JSON in this exact format (no markdown):
+Return ONLY valid JSON in this exact format (no markdown). The "code" field must contain the FULL, COMPLETE TypeScript source code of the page — not a placeholder, not a comment, not a summary:
 {
   "pages": [
     {
       "name": "HomePage",
       "filename": "page.tsx",
-      "code": "import React...",
-      "description": "Main home page"
-    },
-    {
-      "name": "ProductsPage",
-      "filename": "products/page.tsx",
-      "code": "import React...",
-      "description": "Products listing page"
+      "code": "'use client';\\nimport React from 'react';\\n\\nexport default function HomePage() {\\n  return <div>Hello</div>;\\n}",
+      "description": "Main home/dashboard page"
     }
   ]
-}`;
+}
+
+CRITICAL: Every "code" value must be a complete, runnable Next.js page component. Do NOT write placeholders like "// complete page code here" or "// rest of code". Write the actual full code.`;
 
     const messages: ChatMessage[] = [
       { role: 'user', content: prompt }
@@ -879,7 +873,19 @@ Return ONLY valid JSON in this exact format (no markdown):
 
     try {
       const jsonString = this.extractJsonFromResponse(response);
-      const result = JSON.parse(jsonString);
+      
+      // Log first 500 chars for debugging
+      console.log('📄 Extracted JSON (first 500 chars):', jsonString.substring(0, 500));
+      
+      let result;
+      try {
+        result = JSON.parse(jsonString);
+      } catch (parseError) {
+        // Log more context on parse failure
+        console.error('❌ JSON Parse Error at:', parseError);
+        console.error('📄 Full extracted JSON:', jsonString.substring(0, 1000));
+        throw parseError;
+      }
 
       if (!result.pages || !Array.isArray(result.pages)) {
         throw new Error('Invalid response: missing pages array');
@@ -897,6 +903,72 @@ Return ONLY valid JSON in this exact format (no markdown):
       console.error('Failed to generate web pages:', error);
       throw new Error(`Failed to generate web pages: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  /**
+   * Validate and fix a generated Next.js page by replacing any hallucinated
+   * instrumentation function names or wrong API endpoints with the correct ones.
+   */
+  async validateAndFixPage(
+    page: { name: string; filename: string; code: string; description: string },
+    validFunctionNames: string[],
+    validEndpoints: string[]
+  ): Promise<{ name: string; filename: string; code: string; description: string }> {
+    const settings = this.storage.getSettings();
+    if (!settings.llm.apiKey || !settings.llm.baseUrl) {
+      return page;
+    }
+
+    const functionList = validFunctionNames.map(f => `- ${f}`).join('\n');
+    const endpointList = validEndpoints.map(ep => `- http://localhost:3001/api${ep}`).join('\n');
+
+    const prompt = `A Next.js page was generated but may have instrumentation problems. Fix it.
+
+**VALID INSTRUMENTATION FUNCTIONS** (these are the ONLY valid exports from '@/lib/instrumentation'):
+${functionList}
+
+**VALID API ENDPOINTS** (these are the ONLY valid backend URLs):
+${endpointList}
+
+**PAGE CODE TO FIX:**
+\`\`\`typescript
+${page.code}
+\`\`\`
+
+**RULES:**
+1. Replace any name imported from '@/lib/instrumentation' that is NOT in the valid list with the closest matching valid function name. Update all usages in the function body too.
+2. If the page uses inline \`Sentry.startSpan({ op: '...', name: '...' }, ...)\` for an operation that matches one of the valid functions above, replace it with the proper helper (e.g. \`trace_form_submit(callback, attributes)\`) and add the import from '@/lib/instrumentation'. Match by op or name similarity.
+3. Replace any fetch() URL to http://localhost:3001 that does NOT match a valid endpoint with the closest matching valid endpoint.
+4. CRITICAL — trace function call signature: every call to a trace_* function MUST have an \`async () => {...}\` function as the FIRST argument. If you see a call like \`traceFunc(stringValue, ...)\` or \`traceFunc(variableName, 'label', ...)\` where the first arg is not a function, fix it to \`await traceFunc(async () => {}, { field_name: stringValue })\`.
+5. Do NOT modify any other logic, state management, JSX, or styling.
+6. Return ONLY the corrected TypeScript code — no explanation, no markdown fences.`;
+
+    const messages: ChatMessage[] = [{ role: 'user', content: prompt }];
+
+    const raw = await this.callLLM(messages, {
+      baseUrl: settings.llm.baseUrl,
+      apiKey: settings.llm.apiKey,
+      model: settings.llm.model || 'gpt-4-turbo-preview',
+    });
+
+    // Strip markdown fences if LLM wrapped the response (including any trailing explanation)
+    const cleaned = raw
+      .replace(/^```(?:typescript|tsx|ts)?\n?/, '')
+      .replace(/\n?```[\s\S]*$/, '')
+      .trim();
+
+    // Sanity check: ensure fixed code actually contains valid function names
+    const importMatch = cleaned.match(/import \{([^}]+)\} from ['"]@\/lib\/instrumentation['"]/);
+    if (importMatch) {
+      const importedNames = importMatch[1].split(',').map(s => s.trim()).filter(Boolean);
+      const stillInvalid = importedNames.some(n => !validFunctionNames.includes(n));
+      if (stillInvalid) {
+        console.warn(`  ⚠️  LLM fix for ${page.filename} still has invalid imports, keeping original`);
+        return page;
+      }
+    }
+
+    return { ...page, code: cleaned };
   }
 
   /**
@@ -1094,71 +1166,93 @@ Return ONLY valid JSON in this exact format (no markdown):
       .map(span => `- ${span.name} (${span.op}): ${span.description}\n  Attributes: ${Object.keys(span.attributes).join(', ') || 'none'}`)
       .join('\n');
 
-    const prompt = `Generate Express.js API routes for a ${project.project.vertical} application with Sentry instrumentation.
+    // Derive import names and a meaningful endpoint example from the actual spans
+    const backendSpanList = project.instrumentation.spans.filter(s => s.layer === 'backend');
+    const frontendSpanListForRoutes = project.instrumentation.spans.filter(s => s.layer === 'frontend');
+    const allSpanImports = project.instrumentation.spans
+      .map(s => `trace_${s.name.replace(/\./g, '_')}`).join(', ');
+
+    // Derive API endpoints using /${namespace}/${action} pattern — must match frontend page generation
+    const deriveRouteEndpoint = (spanName: string): string => {
+      const parts = spanName.split('.');
+      if (parts.length === 1) return `/${parts[0].replace(/_/g, '-')}`;
+      const namespace = parts[0];
+      const action = parts.slice(1).join('/').replace(/_/g, '-');
+      return `/${namespace}/${action}`;
+    };
+
+    // Build explicit route contract from ALL spans (frontend pages call all of them)
+    const allSpansForRoutes = project.instrumentation.spans;
+    const requiredRoutes = allSpansForRoutes.map(s => {
+      const route = deriveRouteEndpoint(s.name);
+      const fn = `trace_${s.name.replace(/\./g, '_')}`;
+      return `- POST ${route}  → call ${fn}`;
+    }).join('\n');
+
+    const firstAnySpan = allSpansForRoutes[0];
+    const firstBackendSpan = backendSpanList[0];
+    const exampleRoute = firstAnySpan ? deriveRouteEndpoint(firstAnySpan.name) : '/process';
+    const exampleTraceFn = firstAnySpan
+      ? `trace_${firstAnySpan.name.replace(/\./g, '_')}`
+      : 'trace_main_operation';
+    const firstAttrKey = firstBackendSpan && Object.keys(firstBackendSpan.attributes).length > 0
+      ? Object.keys(firstBackendSpan.attributes)[0]
+      : null;
+    // Quote keys that contain dots (e.g. 'http.method') — unquoted dot-keys are JS syntax errors
+    const exampleAttr = firstAttrKey
+      ? `'${firstAttrKey}': req.body?.${firstAttrKey.replace(/\./g, '_')} || ''`
+      : 'request_id: req.id || ""';
+
+    const frontendSpansSummary = frontendSpanListForRoutes
+      .map(s => `- ${s.name} (${s.op}): ${s.description}`)
+      .join('\n');
+
+    const prompt = `Generate Express.js API routes for the following application with Sentry instrumentation.
 
 **PROJECT:** ${project.project.name}
-**REQUIREMENTS:** ${project.project.notes || 'Build functional API endpoints'}
+**VERTICAL:** ${project.project.vertical}
+**REQUIREMENTS:** ${project.project.notes || 'Build functional API endpoints that match the custom spans below'}
 
-**SENTRY BACKEND INSTRUMENTATION REQUIREMENTS (MUST IMPLEMENT ALL):**
-${backendSpans}
+**SENTRY BACKEND INSTRUMENTATION (call these within route handlers):**
+${backendSpans || '(none — instrument with generic spans)'}
+
+**FRONTEND SPANS (each needs a matching API route — these MUST be implemented):**
+${frontendSpansSummary || '(none)'}
+
+**REQUIRED ROUTES (implement ALL of these exactly — these are what the frontend will call):**
+${requiredRoutes || '- Derive routes from the backend spans above'}
 
 **CRITICAL REQUIREMENTS:**
-1. You MUST implement EVERY backend span listed above
-2. Import instrumentation from '../utils/instrumentation'
+1. Implement EVERY route listed above — the frontend will call these exact paths
+2. Import ALL instrumentation from '../utils/instrumentation'
 3. Use pattern: \`const { trace_span_name } = require('../utils/instrumentation');\`
-4. Actually CALL these trace functions in the appropriate API routes
-5. Set all required attributes
+4. Call trace functions within routes with meaningful attributes from req.body / req.params
+5. Return mock data that matches the domain of "${project.project.name}"
 
-**TASK:** Create an Express router file (api.ts) with 5-8 RESTful endpoints.
+**IMPORTANT:**
+- DO NOT generate generic e-commerce routes (products/cart/checkout) unless this is explicitly an e-commerce project
+- Route paths are EXACTLY as specified in REQUIRED ROUTES above — do not rename them
+- CRITICAL: Span attribute keys with dots MUST be quoted strings. CORRECT: \`{ 'http.method': value }\`. WRONG: \`{ http.method: value }\` — this is a JavaScript SyntaxError
 
-**REQUIREMENTS:**
-1. Use Express Router
-2. Include proper error handling with Sentry.captureException
-3. Return mock data that makes sense for the vertical
-4. Implement ALL spans listed above in the appropriate routes
-5. Example of proper instrumentation:
-\`\`\`javascript
-const { trace_payment_process, trace_inventory_check } = require('../utils/instrumentation');
-
-router.post('/checkout', async (req, res) => {
-  try {
-    const result = await trace_payment_process(async () => {
-      // Simulate payment processing
-      await new Promise(resolve => setTimeout(resolve, 500));
-
-      // Check inventory
-      await trace_inventory_check(async () => {
-        // Inventory check logic
-      }, { item_count: req.body.items.length });
-
-      return { orderId: 'ORD-' + Date.now() };
-    }, {
-      amount: req.body.total,
-      payment_method: req.body.paymentMethod
-    });
-
-    res.json({ success: true, ...result });
-  } catch (error) {
-    Sentry.captureException(error);
-    res.status(500).json({ error: 'Checkout failed' });
-  }
-});
-\`\`\`
-
-**STRUCTURE:**
+**CODE PATTERN:**
 \`\`\`javascript
 const express = require('express');
 const router = express.Router();
 const Sentry = require('@sentry/node');
-const { trace_span1, trace_span2 } = require('../utils/instrumentation');
+const { ${allSpanImports || 'trace_main_operation'} } = require('../utils/instrumentation');
 
-// GET endpoints for fetching data
-router.get('/products', async (req, res) => { /* ... */ });
-router.get('/products/:id', async (req, res) => { /* ... */ });
-
-// POST endpoints for creating/processing
-router.post('/checkout', async (req, res) => { /* ... */ });
-router.post('/cart', async (req, res) => { /* ... */ });
+// Implement required route — use exact path from REQUIRED ROUTES list
+router.post('${exampleRoute}', async (req, res) => {
+  try {
+    await ${exampleTraceFn}(async () => {
+      await new Promise(resolve => setTimeout(resolve, Math.random() * 300 + 100));
+    }, { ${exampleAttr} });
+    res.json({ success: true });
+  } catch (error) {
+    Sentry.captureException(error);
+    res.status(500).json({ error: 'Operation failed' });
+  }
+});
 
 module.exports = router;
 \`\`\`
@@ -1171,11 +1265,11 @@ Return ONLY the complete JavaScript code (no JSON wrapper, no markdown code bloc
 
     const response = await this.callLLM(messages, settings.llm);
 
-    // Remove markdown code blocks if present
+    // Remove markdown code blocks if present (including any explanation text after the closing fence)
     let code = response.trim();
     if (code.startsWith('```')) {
       code = code.replace(/^```(?:javascript|js|typescript|ts)?\n?/, '');
-      code = code.replace(/\n?```$/, '');
+      code = code.replace(/\n?```[\s\S]*$/, '');
       code = code.trim();
     }
 
@@ -1261,11 +1355,11 @@ Return ONLY the TypeScript code (no JSON wrapper, no markdown code blocks).`;
 
     const response = await this.callLLM(messages, settings.llm);
     
-    // Remove markdown code blocks if present
+    // Remove markdown code blocks if present (including any explanation text after the closing fence)
     let code = response.trim();
     if (code.startsWith('```')) {
       code = code.replace(/^```(?:typescript|ts|javascript|js)?\n?/, '');
-      code = code.replace(/\n?```$/, '');
+      code = code.replace(/\n?```[\s\S]*$/, '');
       code = code.trim();
     }
 
@@ -1448,21 +1542,7 @@ Return ONLY valid JSON (no markdown):
     // Use regex with dotall flag (s) to match across newlines
     cleanedResponse = cleanedResponse.replace(/:\s*`([\s\S]*?)`/g, (match, content) => {
       // Comprehensive JSON string escape function
-      const escaped = content.replace(/[\u0000-\u001F\u007F-\u009F"\\]/g, (char) => {
-        // Handle common escape sequences
-        switch (char) {
-          case '"': return '\\"';
-          case '\\': return '\\\\';
-          case '\b': return '\\b';
-          case '\f': return '\\f';
-          case '\n': return '\\n';
-          case '\r': return '\\r';
-          case '\t': return '\\t';
-          default:
-            // For other control characters, use unicode escape
-            return '\\u' + ('0000' + char.charCodeAt(0).toString(16)).slice(-4);
-        }
-      });
+      const escaped = this.escapeJsonString(content);
       return `: "${escaped}"`;
     });
 
@@ -1522,7 +1602,161 @@ Return ONLY valid JSON (no markdown):
       throw new Error('Incomplete JSON object or array in LLM response.');
     }
 
-    return cleanedResponse.substring(jsonStartIndex, jsonEndIndex + 1);
+    let jsonStr = cleanedResponse.substring(jsonStartIndex, jsonEndIndex + 1);
+    
+    // Fix common JSON issues (comments, trailing commas, control characters)
+    jsonStr = this.fixCommonJsonIssues(jsonStr);
+
+    return jsonStr;
+  }
+
+  /**
+   * Escape special characters for JSON string values
+   */
+  private escapeJsonString(str: string): string {
+    return str.replace(/[\u0000-\u001F\u007F-\u009F"\\]/g, (char) => {
+      switch (char) {
+        case '"': return '\\"';
+        case '\\': return '\\\\';
+        case '\b': return '\\b';
+        case '\f': return '\\f';
+        case '\n': return '\\n';
+        case '\r': return '\\r';
+        case '\t': return '\\t';
+        default:
+          // For other control characters, use unicode escape
+          return '\\u' + ('0000' + char.charCodeAt(0).toString(16)).slice(-4);
+      }
+    });
+  }
+
+  /**
+   * Fix control characters inside JSON string values that the LLM forgot to escape
+   */
+  private fixControlCharactersInJsonStrings(jsonStr: string): string {
+    const result: string[] = [];
+    let inString = false;
+    let escapeNext = false;
+    
+    for (let i = 0; i < jsonStr.length; i++) {
+      const char = jsonStr[i];
+      const charCode = char.charCodeAt(0);
+      
+      if (escapeNext) {
+        result.push(char);
+        escapeNext = false;
+        continue;
+      }
+      
+      if (char === '\\') {
+        result.push(char);
+        escapeNext = true;
+        continue;
+      }
+      
+      if (char === '"') {
+        result.push(char);
+        inString = !inString;
+        continue;
+      }
+      
+      // If we're inside a string and encounter an unescaped control character, escape it
+      if (inString && charCode < 32) {
+        switch (char) {
+          case '\n': result.push('\\n'); break;
+          case '\r': result.push('\\r'); break;
+          case '\t': result.push('\\t'); break;
+          case '\b': result.push('\\b'); break;
+          case '\f': result.push('\\f'); break;
+          default:
+            result.push('\\u' + ('0000' + charCode.toString(16)).slice(-4));
+        }
+        continue;
+      }
+      
+      result.push(char);
+    }
+    
+    return result.join('');
+  }
+
+  /**
+   * Remove JavaScript-style comments from JSON (LLMs sometimes add these)
+   */
+  private removeJsonComments(jsonStr: string): string {
+    let result = '';
+    let inString = false;
+    let escapeNext = false;
+    let i = 0;
+    
+    while (i < jsonStr.length) {
+      const char = jsonStr[i];
+      const nextChar = jsonStr[i + 1];
+      
+      if (escapeNext) {
+        result += char;
+        escapeNext = false;
+        i++;
+        continue;
+      }
+      
+      if (char === '\\' && inString) {
+        result += char;
+        escapeNext = true;
+        i++;
+        continue;
+      }
+      
+      if (char === '"') {
+        result += char;
+        inString = !inString;
+        i++;
+        continue;
+      }
+      
+      // Skip single-line comments (// ...) when not in string
+      if (!inString && char === '/' && nextChar === '/') {
+        // Skip until end of line
+        while (i < jsonStr.length && jsonStr[i] !== '\n') {
+          i++;
+        }
+        continue;
+      }
+      
+      // Skip multi-line comments (/* ... */) when not in string
+      if (!inString && char === '/' && nextChar === '*') {
+        i += 2; // Skip /*
+        while (i < jsonStr.length - 1 && !(jsonStr[i] === '*' && jsonStr[i + 1] === '/')) {
+          i++;
+        }
+        i += 2; // Skip */
+        continue;
+      }
+      
+      result += char;
+      i++;
+    }
+    
+    return result;
+  }
+
+  /**
+   * Fix common JSON issues from LLM output
+   */
+  private fixCommonJsonIssues(jsonStr: string): string {
+    // Remove comments first
+    let fixed = this.removeJsonComments(jsonStr);
+    
+    // Fix trailing commas before ] or }
+    fixed = fixed.replace(/,(\s*[}\]])/g, '$1');
+    
+    // Fix single quotes used as string delimiters (outside of already-quoted strings)
+    // This is tricky - we need to be careful not to break strings that contain single quotes
+    
+    // Fix control characters
+    fixed = this.fixControlCharactersInJsonStrings(fixed);
+    
+    return fixed;
   }
 
   /**
@@ -1591,6 +1825,346 @@ Return a structured analysis that can be used to recommend relevant Sentry instr
       console.error('Failed to analyze website:', error);
       return `Failed to fetch website (${error instanceof Error ? error.message : 'Unknown error'}). Proceeding with vertical-based recommendations only.`;
     }
+  }
+
+  async suggestCustomSpans(projectId: string): Promise<{
+    message: string;
+    spans: SpanDefinition[];
+  }> {
+    const project = this.storage.getProject(projectId);
+    const settings = this.storage.getSettings();
+
+    if (!settings.llm.apiKey || !settings.llm.baseUrl) {
+      throw new Error('LLM settings not configured');
+    }
+
+    const { name, vertical, customerWebsite, notes } = project.project;
+    const { type: stackType, backend, frontend } = project.stack;
+
+    let stackDesc = '';
+    if (stackType === 'web') {
+      stackDesc = `Web app (${frontend || 'Next.js'} frontend, ${backend} backend)`;
+    } else if (stackType === 'mobile') {
+      stackDesc = `Mobile app (React Native, ${backend} backend)`;
+    } else {
+      stackDesc = `Backend-only service (${backend})`;
+    }
+
+    const projectContext = [
+      `- Name: ${name}`,
+      `- Vertical: ${vertical}`,
+      `- Stack: ${stackDesc}`,
+      customerWebsite ? `- Website: ${customerWebsite}` : null,
+      notes ? `- Notes: ${notes}` : null
+    ].filter(Boolean).join('\n');
+
+    const messages: ChatMessage[] = [
+      {
+        role: 'system',
+        content: 'You are a Sentry instrumentation expert. Always respond with valid JSON only — no markdown, no code fences, no extra text.'
+      },
+      {
+        role: 'user',
+        content: `Based on the following project information, suggest 4-6 highly relevant custom spans and attributes that would provide the most valuable observability insights for this specific application.
+
+Project Information:
+${projectContext}
+
+Return a JSON object with this exact structure:
+{
+  "message": "A brief 2-3 sentence conversational message explaining what you are suggesting and why these spans are valuable for this specific project",
+  "spans": [
+    {
+      "name": "operation.specific_action",
+      "op": "operation",
+      "layer": "backend",
+      "description": "What this span measures",
+      "attributes": {
+        "attr_name": "What this attribute captures"
+      },
+      "pii": { "keys": [] }
+    }
+  ]
+}
+
+Requirements:
+- Suggest spans SPECIFIC to this project's domain and vertical (not generic boilerplate)
+- Each span should have 2-4 meaningful attributes
+- Mark any PII attributes (email, name, address, card, etc.) in the pii.keys array
+- Span names must use snake_case dot notation (e.g., checkout.validate_cart)
+- Only return the JSON object`
+      }
+    ];
+
+    const response = await this.callLLM(messages, settings.llm);
+
+    let cleaned = response.trim();
+    if (cleaned.startsWith('```')) {
+      cleaned = cleaned.replace(/^```(?:json)?\n?/, '').replace(/\n?```[\s\S]*$/, '');
+    }
+
+    const parsed = JSON.parse(cleaned);
+
+    const spans: SpanDefinition[] = (parsed.spans || []).map((s: any) => ({
+      name: String(s.name || ''),
+      op: String(s.op || (s.name || '').split('.')[0] || ''),
+      layer: s.layer === 'frontend' ? 'frontend' as const : 'backend' as const,
+      description: String(s.description || ''),
+      attributes: (s.attributes && typeof s.attributes === 'object')
+        ? Object.fromEntries(Object.entries(s.attributes).map(([k, v]) => [k, String(v)]))
+        : {},
+      pii: { keys: Array.isArray(s.pii?.keys) ? s.pii.keys : [] }
+    })).filter((s: SpanDefinition) => s.name.length > 0);
+
+    return {
+      message: String(parsed.message || 'I have some custom span suggestions for your project.'),
+      spans
+    };
+  }
+
+  /**
+   * Generate dashboard widgets tailored to the project using a constrained vocabulary
+   * of valid Sentry query syntax. Throws if fewer than 3 valid widgets are produced
+   * so the caller can fall back to the hardcoded template.
+   */
+  async generateDashboardWidgets(project: EngagementSpec): Promise<any[]> {
+    const settings = this.storage.getSettings();
+    if (!settings.llm.apiKey || !settings.llm.baseUrl) {
+      throw new Error('LLM not configured');
+    }
+
+    const { name, vertical, notes } = project.project;
+    const spans = project.instrumentation.spans;
+
+    // Build the span catalogue section
+    const spanLines = spans.map(s => {
+      const attrKeys = Object.keys(s.attributes || {}).join(', ') || '(none)';
+      return `  • ${s.name} (op: ${s.op}) — ${s.description || 'no description'} — attributes: ${attrKeys}`;
+    }).join('\n');
+
+    // Collect all project-specific attribute keys for the vocabulary block
+    const allAttrKeys = [...new Set(spans.flatMap(s => Object.keys(s.attributes || {})))];
+    const attrKeysLine = allAttrKeys.length > 0 ? allAttrKeys.join(' | ') : '(none)';
+
+    // Collect unique ops for reference
+    const uniqueOps = [...new Set(spans.map(s => s.op))];
+    const opsLine = uniqueOps.join(' | ');
+
+    const prompt = `You are a Sentry observability expert. Generate 8–12 dashboard widgets for the project below.
+Use ONLY the vocabulary provided — any deviation will break the dashboard.
+
+PROJECT
+  Name: ${name}
+  Vertical: ${vertical}
+  Description: ${notes || '(none)'}
+
+CUSTOM SPANS
+${spanLines || '  (no custom spans defined)'}
+
+════════════════════════════════════════════════════
+CONSTRAINED VOCABULARY — use NOTHING outside this list
+════════════════════════════════════════════════════
+
+VALID AGGREGATES
+  widgetType "spans":
+    count(span.duration) | p50(span.duration) | p75(span.duration) |
+    p95(span.duration) | p99(span.duration) | avg(span.duration) |
+    count_unique(user) | failure_rate() | sum(span.duration)
+  widgetType "error-events":
+    count()
+
+VALID GROUPBY COLUMNS (for "columns" and "fields" arrays)
+  span.op | span.description | transaction | span.status
+  Project-specific attribute keys: ${attrKeysLine}
+
+VALID SPAN OPS (use only these exact values in conditions)
+  ${opsLine}
+
+VALID CONDITIONS syntax (combine with spaces)
+  span.op:<value>          — use an exact op from the list above
+  span.description:<value> — use an exact span name from the span list above
+  is_transaction:1         — pageload / navigation spans only
+  has:error                — spans that recorded an error
+  !has:error               — spans without errors
+  ""                       — empty string = no filter (all spans)
+
+VALID displayType:  big_number | area | line | table
+VALID widgetType:   spans | error-events
+
+big_number query rules (CRITICAL):
+  columns: []          ← always empty for big_number
+  fields:  [<aggregate>]  ← only the single aggregate, nothing else
+  orderby: ""          ← always empty string for big_number
+
+LAYOUT (6-column grid)
+  big_number:  w=2, h=1    (fit three side-by-side in one row)
+  area / line: w=2 to 6, h=2
+  table:       w=4 to 6, h=2 to 3
+  Rules: x + w must be ≤ 6; h ≥ 1; no two widgets may overlap
+
+════════════════════════════════════════════════════
+INSTRUCTIONS
+════════════════════════════════════════════════════
+1. Start with exactly 3 big_number KPIs at y=0 (x=0,w=2 | x=2,w=2 | x=4,w=2).
+2. Add 2–3 area or line trend charts in rows below (y≥1).
+3. Add 2–4 project-specific widgets that use the span names / ops above
+   to make filters that are semantically meaningful for this project.
+4. End with exactly 1 table widget at full width (w=6) as the final row.
+5. Title each widget with a human-readable business metric name — NOT a raw query.
+6. For conditions, use the EXACT span.description or span.op values from the list.
+   NEVER use "and", "or", "AND", "OR" — separate multiple filters with a SPACE only.
+   CORRECT: "span.op:signup span.description:signup.form"
+   WRONG:   "span.op:signup AND span.description:signup.form"
+7. Pack rows tightly so widgets do not leave blank gaps.
+8. The "fields" array must contain ONLY these valid Sentry field names:
+   span.description | span.op | span.duration | transaction | span.status
+   plus any aggregate expressions from the aggregates list.
+   NEVER put custom attribute names (e.g. "email", "form_data") in fields.
+
+Return ONLY a valid JSON array of widget objects. No markdown fences, no wrapper object.
+
+EXAMPLES:
+
+big_number widget (note: columns=[], fields=[aggregate only], orderby=""):
+{
+  "title": "Avg Submission Latency",
+  "description": "Average duration of form submission spans",
+  "displayType": "big_number",
+  "widgetType": "spans",
+  "interval": "1h",
+  "queries": [{
+    "aggregates": ["avg(span.duration)"],
+    "columns": [],
+    "conditions": "span.op:operation span.description:signup.form_submission",
+    "fields": ["avg(span.duration)"],
+    "orderby": "",
+    "name": "Avg Submission Latency"
+  }],
+  "layout": { "x": 0, "y": 0, "w": 2, "h": 1, "minH": 1 }
+}
+
+area/line widget:
+{
+  "title": "Signup Form Submissions",
+  "description": "Volume of signup form submission spans over time",
+  "displayType": "area",
+  "widgetType": "spans",
+  "interval": "1h",
+  "queries": [{
+    "aggregates": ["count(span.duration)"],
+    "columns": ["span.description"],
+    "conditions": "span.op:operation",
+    "fields": ["span.description", "count(span.duration)"],
+    "orderby": "-count(span.duration)",
+    "name": "Signup Form Submissions"
+  }],
+  "layout": { "x": 0, "y": 3, "w": 3, "h": 2, "minH": 2 }
+}`;
+
+    const messages: ChatMessage[] = [{ role: 'user', content: prompt }];
+
+    const raw = await this.callLLM(messages, {
+      baseUrl: settings.llm.baseUrl,
+      apiKey: settings.llm.apiKey,
+      model: settings.llm.model || 'gpt-4-turbo-preview',
+    });
+
+    // Strip markdown fences if the LLM wrapped the response (including any trailing explanation)
+    const cleaned = raw
+      .replace(/^```(?:json)?\n?/, '')
+      .replace(/\n?```[\s\S]*$/, '')
+      .trim();
+
+    let parsed: any[];
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch {
+      throw new Error(`LLM returned non-JSON response for dashboard widgets: ${cleaned.slice(0, 200)}`);
+    }
+
+    if (!Array.isArray(parsed)) {
+      throw new Error('LLM dashboard response is not a JSON array');
+    }
+
+    // Valid Sentry span field names (non-aggregate columns)
+    const VALID_SPAN_FIELDS = new Set([
+      'span.description', 'span.op', 'span.duration', 'span.status',
+      'transaction', 'project', 'timestamp', 'id', 'trace',
+    ]);
+
+    // Sanitize a single widget before validation
+    const sanitizeWidget = (w: any): any => {
+      if (!w || typeof w !== 'object') return w;
+      const out = { ...w };
+      const isBigNumber = out.displayType === 'big_number';
+      if (Array.isArray(out.queries)) {
+        out.queries = out.queries.map((q: any) => {
+          if (!q || typeof q !== 'object') return q;
+          const sq = { ...q };
+          // Strip SQL-style boolean operators from conditions
+          if (typeof sq.conditions === 'string') {
+            sq.conditions = sq.conditions
+              .replace(/\s+and\s+/gi, ' ')
+              .replace(/\s+or\s+/gi, ' ')
+              .trim();
+          }
+          // big_number: columns must be empty, fields must be only the aggregates
+          if (isBigNumber) {
+            sq.columns = [];
+            sq.fields = Array.isArray(sq.aggregates) ? [...sq.aggregates] : sq.fields;
+            sq.orderby = '';
+          } else {
+            // Sanitize fields: keep only valid span fields and aggregate expressions
+            if (Array.isArray(sq.fields)) {
+              sq.fields = sq.fields.filter((f: string) =>
+                VALID_SPAN_FIELDS.has(f) || VALID_AGGREGATE_RE.test(f)
+              );
+              // Always keep at least one non-aggregate field
+              if (!sq.fields.some((f: string) => VALID_SPAN_FIELDS.has(f))) {
+                sq.fields = ['span.description', ...sq.fields];
+              }
+            }
+          }
+          return sq;
+        });
+      }
+      return out;
+    };
+
+    // Validation constants
+    const VALID_DISPLAY_TYPES = new Set(['big_number', 'area', 'line', 'table']);
+    const VALID_WIDGET_TYPES  = new Set(['spans', 'error-events']);
+    const VALID_AGGREGATE_RE  = /^(count|p\d+|avg|sum|count_unique|failure_rate)\([\w.]*\)$|^(count|failure_rate)\(\)$/;
+
+    const isValidWidget = (w: any): boolean => {
+      if (!w || typeof w !== 'object') return false;
+      if (!w.title || !w.displayType || !w.widgetType) return false;
+      if (!Array.isArray(w.queries) || w.queries.length === 0) return false;
+      if (!w.layout || typeof w.layout !== 'object') return false;
+      if (!VALID_DISPLAY_TYPES.has(w.displayType)) return false;
+      if (!VALID_WIDGET_TYPES.has(w.widgetType)) return false;
+      for (const q of w.queries) {
+        if (!Array.isArray(q.aggregates) || q.aggregates.length === 0) return false;
+        if (!q.aggregates.every((a: string) => VALID_AGGREGATE_RE.test(a))) return false;
+      }
+      const { x, y, w: width, h } = w.layout;
+      if ([x, y, width, h].some(v => typeof v !== 'number')) return false;
+      if (x + width > 6 || h < 1) return false;
+      return true;
+    };
+
+    const valid = parsed.map(sanitizeWidget).filter(isValidWidget);
+    const dropped = parsed.length - valid.length;
+    if (dropped > 0) {
+      console.warn(`  ⚠️  Dropped ${dropped} invalid widget(s) from LLM dashboard response`);
+    }
+
+    if (valid.length < 3) {
+      throw new Error(`Only ${valid.length} valid widget(s) generated — falling back to template`);
+    }
+
+    console.log(`✅ LLM generated ${valid.length} valid dashboard widgets`);
+    return valid;
   }
 
   private async callLLM(messages: ChatMessage[], config: { baseUrl?: string; apiKey?: string; model?: string }): Promise<string> {

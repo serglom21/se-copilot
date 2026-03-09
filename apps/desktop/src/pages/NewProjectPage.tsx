@@ -67,21 +67,15 @@ export default function NewProjectPage() {
 
     setLoading(true);
 
-    // Start Sentry transaction for project creation
-    const transaction = Sentry.startTransaction({
-      name: 'Create Project',
-      op: 'user.action',
+    // Track project metadata
+    Sentry.setContext('project', {
+      vertical: formData.vertical,
+      stackType: formData.stackType,
+      backendFramework: formData.backendFramework,
     });
 
     try {
       const slug = formData.name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-
-      // Track project metadata
-      Sentry.setContext('project', {
-        vertical: formData.vertical,
-        stackType: formData.stackType,
-        backendFramework: formData.backendFramework,
-      });
 
       const project = await createProject({
         project: {
@@ -111,12 +105,8 @@ export default function NewProjectPage() {
         status: 'draft'
       });
 
-      transaction.setStatus('ok');
-      transaction.finish();
       navigate(`/project/${project.id}/plan`);
     } catch (error) {
-      transaction.setStatus('internal_error');
-      transaction.finish();
       Sentry.captureException(error);
       setErrors({ submit: String(error) });
     } finally {

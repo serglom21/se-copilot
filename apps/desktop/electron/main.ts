@@ -1,11 +1,6 @@
 import * as Sentry from '@sentry/electron/main';
 
 // Initialize Sentry at the very top
-Sentry.init({
-  dsn: 'https://9274b811affb135097d7c3e83cef7508@o4510819177529344.ingest.us.sentry.io/4510819184803840',
-  tracesSampleRate: 1.0,
-  environment: process.env.NODE_ENV || 'production',
-});
 
 import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import path from 'path';
@@ -16,6 +11,7 @@ import { LLMService } from './services/llm';
 import { GeneratorService } from './services/generator';
 import { GitHubService } from './services/github';
 import { DataRunnerService } from './services/data-runner';
+import { LiveDataGeneratorService } from './services/live-data-generator';
 import { DeploymentService } from './services/deployment';
 import { ExpoDeployService } from './services/expo-deploy';
 import { SentryAPIService } from './services/sentry-api';
@@ -38,6 +34,7 @@ let llmService: LLMService;
 let generatorService: GeneratorService;
 let githubService: GitHubService;
 let dataRunnerService: DataRunnerService;
+let liveDataGeneratorService: LiveDataGeneratorService;
 let deploymentService: DeploymentService;
 let expoDeployService: ExpoDeployService;
 let sentryAPIService: SentryAPIService;
@@ -76,6 +73,7 @@ app.whenReady().then(async () => {
   generatorService = new GeneratorService(storage, llmService);
   githubService = new GitHubService(storage);
   dataRunnerService = new DataRunnerService(storage);
+  liveDataGeneratorService = new LiveDataGeneratorService(storage);
   deploymentService = new DeploymentService(storage);
   expoDeployService = new ExpoDeployService(storage);
   sentryAPIService = new SentryAPIService(storage);
@@ -139,6 +137,10 @@ function setupIpcHandlers() {
     return llmService.generateInstrumentationPlan(project);
   });
 
+  ipcMain.handle('chat:suggest-custom-spans', async (_, projectId: string) => {
+    return llmService.suggestCustomSpans(projectId);
+  });
+
   // Generation
   ipcMain.handle('generate:app', async (_, projectId: string) => {
     const project = storage.getProject(projectId);
@@ -160,7 +162,7 @@ function setupIpcHandlers() {
     return generatorService.generateDataScript(project);
   });
 
-  // Data generation
+  // Data generation (Python script mode)
   ipcMain.handle('data:run', async (event, projectId: string, config: any) => {
     return dataRunnerService.runDataGenerator(
       projectId,
@@ -172,6 +174,25 @@ function setupIpcHandlers() {
         event.sender.send('data:error', error);
       }
     );
+  });
+
+  // Live data generation (Puppeteer mode with real SDKs)
+  ipcMain.handle('data:run-live', async (event, projectId: string, config: any) => {
+    return liveDataGeneratorService.runLiveDataGenerator(
+      projectId,
+      config,
+      (output) => {
+        event.sender.send('data:output', output);
+      },
+      (error) => {
+        event.sender.send('data:error', error);
+      }
+    );
+  });
+
+  // Stop live data generation
+  ipcMain.handle('data:stop-live', async () => {
+    return liveDataGeneratorService.stop();
   });
 
   // GitHub
@@ -330,8 +351,11 @@ function setupIpcHandlers() {
 }
 
 // Cleanup on app quit
-app.on('before-quit', () => {
+app.on('before-quit', async () => {
   if (deploymentService) {
     deploymentService.stopAll();
+  }
+  if (liveDataGeneratorService) {
+    await liveDataGeneratorService.stop();
   }
 });

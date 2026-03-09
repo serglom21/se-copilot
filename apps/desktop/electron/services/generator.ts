@@ -37,6 +37,9 @@ export class GeneratorService {
       // Generate config files (README, etc.)
       this.generateConfigFiles(appPath, project);
 
+      // Generate user flows for live data generation
+      this.generateUserFlows(outputPath, project);
+
       // Save engagement spec
       const specPath = path.join(outputPath, 'engagement-spec.json');
       fs.writeFileSync(specPath, JSON.stringify(project, null, 2));
@@ -74,7 +77,22 @@ export class GeneratorService {
       const outputPath = this.storage.getOutputPath(project.id);
       const dashboardPath = path.join(outputPath, 'sentry-dashboard.json');
 
-      const dashboard = this.buildDashboard(project);
+      let dashboard: any;
+      try {
+        const widgets = await this.llm.generateDashboardWidgets(project);
+        dashboard = {
+          title: `${project.project.name} — Monitoring Dashboard`,
+          filters: {},
+          projects: [],
+          environment: [],
+          widgets,
+        };
+        console.log(`✅ LLM generated ${widgets.length} dashboard widgets`);
+      } catch (err) {
+        console.warn('⚠️  LLM dashboard generation failed, using template:', err);
+        dashboard = this.buildDashboard(project);
+      }
+
       fs.writeFileSync(dashboardPath, JSON.stringify(dashboard, null, 2));
 
       return { success: true, outputPath: dashboardPath };
@@ -155,13 +173,13 @@ NUM_ERRORS=20
       version: '0.1.0',
       private: true,
       scripts: {
-        dev: 'next dev',
+        dev: 'next dev -p 3000',
         build: 'next build',
         start: 'next start',
         lint: 'next lint'
       },
       dependencies: {
-        '@sentry/nextjs': '^7.99.0',
+        '@sentry/nextjs': '^8.0.0',
         'next': '^14.1.0',
         'react': '^18.2.0',
         'react-dom': '^18.2.0'
@@ -266,8 +284,8 @@ module.exports = {
         start: 'node dist/index.js'
       },
       dependencies: {
-        '@sentry/node': '^7.99.0',
-        '@sentry/profiling-node': '^7.99.0',
+        '@sentry/node': '^8.0.0',
+        '@sentry/profiling-node': '^8.0.0',
         'express': '^4.18.2',
         'cors': '^2.8.5',
         'dotenv': '^16.3.1'
@@ -314,38 +332,136 @@ module.exports = {
   }
 
   private generateSentryConfig(basePath: string, layer: 'frontend' | 'backend', project: EngagementSpec): void {
-    const sentryConfigPath = path.join(basePath, 'sentry.config.js');
-    
-    const config = layer === 'frontend' ? `
-import * as Sentry from '@sentry/nextjs';
+    if (layer === 'frontend') {
+      // Next.js requires specific Sentry config files
+      
+      // sentry.client.config.ts - runs in browser
+      const clientConfig = `import * as Sentry from '@sentry/nextjs';
+
+Sentry.init({
+  dsn: process.env.NEXT_PUBLIC_SENTRY_DSN,
+  environment: process.env.NEXT_PUBLIC_SENTRY_ENVIRONMENT || 'development',
+
+  // Explicitly enable browser tracing — required in @sentry/nextjs v8 for pageload
+  // and navigation transactions and for custom spans to attach to a root trace
+  integrations: [
+    Sentry.browserTracingIntegration(),
+  ],
+
+  // Set tracesSampleRate to 1.0 to capture 100% of transactions
+  tracesSampleRate: 1.0,
+
+  // Propagate trace headers to backend so FE→BE spans connect in Sentry
+  tracePropagationTargets: ['localhost', /^\\//],
+
+  // Enable debug mode for troubleshooting (disable in production)
+  debug: process.env.NODE_ENV === 'development',
+});
+`;
+      fs.writeFileSync(path.join(basePath, 'sentry.client.config.ts'), clientConfig);
+
+      // sentry.server.config.ts - runs on server
+      const serverConfig = `import * as Sentry from '@sentry/nextjs';
+
+Sentry.init({
+  dsn: process.env.NEXT_PUBLIC_SENTRY_DSN,
+  environment: process.env.NEXT_PUBLIC_SENTRY_ENVIRONMENT || 'development',
+  
+  // Set tracesSampleRate to 1.0 to capture 100% of transactions
+  tracesSampleRate: 1.0,
+  
+  // Enable debug mode for troubleshooting
+  debug: process.env.NODE_ENV === 'development',
+});
+`;
+      fs.writeFileSync(path.join(basePath, 'sentry.server.config.ts'), serverConfig);
+
+      // sentry.edge.config.ts - for edge runtime
+      const edgeConfig = `import * as Sentry from '@sentry/nextjs';
 
 Sentry.init({
   dsn: process.env.NEXT_PUBLIC_SENTRY_DSN,
   environment: process.env.NEXT_PUBLIC_SENTRY_ENVIRONMENT || 'development',
   tracesSampleRate: 1.0,
-  debug: false,
-  integrations: [
-    new Sentry.BrowserTracing(),
-  ],
+  debug: process.env.NODE_ENV === 'development',
 });
-` : `
-const Sentry = require('@sentry/node');
-const { ProfilingIntegration } = require('@sentry/profiling-node');
+`;
+      fs.writeFileSync(path.join(basePath, 'sentry.edge.config.ts'), edgeConfig);
+
+      // instrumentation.ts - for App Router
+      const instrumentationConfig = `import * as Sentry from '@sentry/nextjs';
+
+export async function register() {
+  if (process.env.NEXT_RUNTIME === 'nodejs') {
+    await import('./sentry.server.config');
+  }
+
+  if (process.env.NEXT_RUNTIME === 'edge') {
+    await import('./sentry.edge.config');
+  }
+}
+
+export const onRequestError = Sentry.captureRequestError;
+`;
+      fs.writeFileSync(path.join(basePath, 'instrumentation.ts'), instrumentationConfig);
+
+      // Update next.config.js to use withSentryConfig
+      const nextConfig = `const { withSentryConfig } = require('@sentry/nextjs');
+
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  env: {
+    NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'
+  },
+  // Disable strict mode to avoid double-rendering during development
+  reactStrictMode: false,
+}
+
+module.exports = withSentryConfig(nextConfig, {
+  // Sentry webpack plugin options
+  org: process.env.SENTRY_ORG,
+  project: process.env.SENTRY_PROJECT,
+  
+  // Suppress source map upload (we're just generating demo data)
+  silent: true,
+  
+  // Upload source maps for better error tracking
+  widenClientFileUpload: true,
+  
+  // Hide source maps from client bundles
+  hideSourceMaps: true,
+  
+  // Disable logger for cleaner output
+  disableLogger: true,
+  
+  // Automatically instrument API routes and server components
+  automaticVercelMonitors: true,
+});
+`;
+      fs.writeFileSync(path.join(basePath, 'next.config.js'), nextConfig);
+
+    } else {
+      // Backend (Express) Sentry config - Sentry v8 syntax
+      const sentryConfigPath = path.join(basePath, 'sentry.config.js');
+      const config = `const Sentry = require('@sentry/node');
+const { nodeProfilingIntegration } = require('@sentry/profiling-node');
 
 Sentry.init({
   dsn: process.env.SENTRY_DSN,
   environment: process.env.SENTRY_ENVIRONMENT || 'development',
   tracesSampleRate: 1.0,
   profilesSampleRate: 1.0,
+  debug: process.env.NODE_ENV === 'development',
   integrations: [
-    new ProfilingIntegration(),
+    nodeProfilingIntegration(),
+    Sentry.expressIntegration(),
   ],
 });
 
 module.exports = Sentry;
 `;
-
-    fs.writeFileSync(sentryConfigPath, config);
+      fs.writeFileSync(sentryConfigPath, config);
+    }
   }
 
   private async generateFrontendPagesWithLLM(frontendPath: string, project: EngagementSpec): Promise<void> {
@@ -370,6 +486,11 @@ module.exports = Sentry;
         fs.writeFileSync(pagePath, page.code);
         console.log(`  ✓ Created ${page.filename}: ${page.description}`);
       }
+
+      // Post-generation validation: fix any hallucinated instrumentation imports or API URLs.
+      // We read the generated lib/instrumentation.ts to get ground-truth function names,
+      // then check each page for invalid imports and run an LLM fix pass on offenders.
+      await this.validateAndFixGeneratedPages(pages, appPath, frontendPath, project);
 
       // Create globals.css
       const globalsCss = `@tailwind base;
@@ -454,222 +575,709 @@ export default function RootLayout({
     }
   }
 
+  /**
+   * After LLM-generated pages are written to disk, validate ALL page.tsx files in the
+   * app/ directory (both newly generated AND pre-existing stale files from prior generations).
+   *
+   * Two failure modes are caught and sent to the LLM for fixing:
+   * 1. Invalid imports — the page imports a trace_* name that no longer exists in
+   *    lib/instrumentation.ts (happens when a project is regenerated with a new spec).
+   * 2. Inline Sentry.startSpan — the page bypassed the generated helpers and called
+   *    Sentry.startSpan() directly with no import from @/lib/instrumentation.
+   */
+  private async validateAndFixGeneratedPages(
+    pages: Array<{ name: string; filename: string; code: string; description: string }>,
+    appPath: string,
+    frontendPath: string,
+    project: EngagementSpec
+  ): Promise<void> {
+    const instrumentationPath = path.join(frontendPath, 'lib', 'instrumentation.ts');
+    if (!fs.existsSync(instrumentationPath)) {
+      console.warn('⚠️  lib/instrumentation.ts not found, skipping validation');
+      return;
+    }
+
+    // Extract ground-truth function names from the generated instrumentation file
+    const instrContent = fs.readFileSync(instrumentationPath, 'utf-8');
+    const validFns = Array.from(instrContent.matchAll(/export function (trace_\w+)/g), m => m[1]);
+    if (validFns.length === 0) {
+      console.warn('⚠️  No trace_* functions found in instrumentation.ts, skipping validation');
+      return;
+    }
+
+    // Derive valid API endpoints using the same pattern as the LLM prompt
+    const validEndpoints = project.instrumentation.spans.map(span => {
+      const parts = span.name.split('.');
+      if (parts.length === 1) return `/${parts[0].replace(/_/g, '-')}`;
+      const namespace = parts[0];
+      const action = parts.slice(1).join('/').replace(/_/g, '-');
+      return `/${namespace}/${action}`;
+    });
+
+    // Build the full set of pages to check:
+    // - The LLM's freshly generated pages (may have hallucinated names or inline Sentry.startSpan)
+    // - Any pre-existing page.tsx files on disk NOT in the LLM's output (stale from prior generation)
+    const generatedFilenames = new Set(pages.map(p => p.filename));
+    const diskPages = this.scanPageFilesInDirectory(appPath)
+      .filter(f => !generatedFilenames.has(f.filename))
+      .map(f => ({ name: f.filename, filename: f.filename, code: f.code, description: 'pre-existing' }));
+
+    const allPages = [...pages, ...diskPages];
+    console.log(`🔍 Validating ${allPages.length} pages (${pages.length} generated + ${diskPages.length} pre-existing)...`);
+
+    for (const page of allPages) {
+      // Sanitize unquoted dot-notation object keys in all pages unconditionally.
+      // LLM sometimes emits { http.status_code: 0 } which is a JS syntax error.
+      const sanitized = page.code.replace(
+        /([{,]\s*)([a-zA-Z][a-zA-Z0-9]*(?:\.[a-zA-Z][a-zA-Z0-9]*)+)\s*:/g,
+        "$1'$2':"
+      );
+      if (sanitized !== page.code) {
+        page.code = sanitized;
+        fs.writeFileSync(path.join(appPath, page.filename), sanitized);
+        console.log(`  ✓ ${page.filename} — fixed unquoted dot-notation keys`);
+      }
+
+      const importMatch = page.code.match(/import \{([^}]+)\} from ['"]@\/lib\/instrumentation['"]/);
+      const importedNames = importMatch
+        ? importMatch[1].split(',').map((s: string) => s.trim()).filter(Boolean)
+        : [];
+      const invalidNames = importedNames.filter((n: string) => !validFns.includes(n));
+
+      // Detect inline Sentry.startSpan usage without any instrumentation import
+      const hasInlineSpan = page.code.includes('Sentry.startSpan(');
+      const hasInstrumentationImport = page.code.includes("from '@/lib/instrumentation'");
+
+      // Detect trace functions called with wrong first argument (string/identifier instead of async callback)
+      // Valid: trace_foo(async () => {...}, attrs)
+      // Invalid: trace_foo(stringValue, ...) or trace_foo(varName, 'label', ...)
+      const hasWrongCallSignature = /trace_\w+\(\s*(?!async\s*\()['"`\w]/.test(page.code);
+
+      const needsFix = invalidNames.length > 0
+        || (hasInlineSpan && !hasInstrumentationImport)
+        || hasWrongCallSignature;
+
+      if (!needsFix) {
+        console.log(`  ✓ ${page.filename} — OK`);
+        continue;
+      }
+
+      const reason = invalidNames.length > 0
+        ? `invalid imports: ${invalidNames.join(', ')}`
+        : hasWrongCallSignature
+          ? 'trace function called with non-callback first argument (string/identifier instead of async () => {})'
+          : 'uses inline Sentry.startSpan without instrumentation helpers';
+      console.log(`  ⚠️  ${page.filename} — ${reason} — fixing with LLM...`);
+
+      try {
+        const fixed = await this.llm.validateAndFixPage(page, validFns, validEndpoints);
+        const pagePath = path.join(appPath, page.filename);
+        fs.writeFileSync(pagePath, fixed.code);
+        page.code = fixed.code;
+        console.log(`  ✓ Fixed ${page.filename}`);
+      } catch (err) {
+        console.warn(`  ⚠️  Could not fix ${page.filename}: ${err}`);
+      }
+    }
+  }
+
+  /**
+   * Scan all page.tsx files recursively under appPath and return their filename
+   * (relative to appPath) and code. Used to find pre-existing pages for validation.
+   */
+  private scanPageFilesInDirectory(appPath: string): Array<{ filename: string; code: string }> {
+    const results: Array<{ filename: string; code: string }> = [];
+
+    const scan = (dir: string, relDir: string = '') => {
+      if (!fs.existsSync(dir)) return;
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (entry.isDirectory() && !entry.name.startsWith('.') && !entry.name.startsWith('_') && entry.name !== 'node_modules') {
+          scan(path.join(dir, entry.name), relDir ? `${relDir}/${entry.name}` : entry.name);
+        } else if (entry.name === 'page.tsx') {
+          const fullPath = path.join(dir, entry.name);
+          const filename = relDir ? `${relDir}/page.tsx` : 'page.tsx';
+          results.push({ filename, code: fs.readFileSync(fullPath, 'utf-8') });
+        }
+      }
+    };
+
+    scan(appPath);
+    return results;
+  }
+
+  private getVerticalPageConfig(vertical: string, projectName: string): any {
+    const configs: Record<string, any> = {
+      ecommerce: {
+        loadDataSpanName: 'Load Products',
+        apiEndpoint: 'products',
+        dataKey: 'products',
+        heroTitle: 'Welcome to Our Store',
+        heroSubtitle: 'Discover amazing products with real-time monitoring',
+        itemIcon: 'image',
+        defaultIcon: '📦',
+        itemTitle: 'name',
+        itemSubtitle: 'description',
+        showPrice: true,
+        priceField: 'price',
+        itemClickSpanName: 'View Product',
+        navLinks: [
+          { href: '/products', label: '🛍️ Products' },
+          { href: '/cart', label: '🛒 Cart' },
+          { href: '/checkout', label: '💳 Checkout' }
+        ],
+        fallbackData: [
+          { id: 1, name: 'Premium Headphones', price: 99.99, image: '🎧', description: 'Wireless noise-cancelling' },
+          { id: 2, name: 'Smart Watch', price: 149.99, image: '⌚', description: 'Fitness tracking' },
+          { id: 3, name: 'Laptop Stand', price: 79.99, image: '💻', description: 'Ergonomic design' },
+        ]
+      },
+      fintech: {
+        loadDataSpanName: 'Load Accounts',
+        apiEndpoint: 'accounts',
+        dataKey: 'accounts',
+        heroTitle: 'Your Financial Dashboard',
+        heroSubtitle: 'Manage your finances with confidence',
+        itemIcon: 'icon',
+        defaultIcon: '💰',
+        itemTitle: 'name',
+        itemSubtitle: 'type',
+        showPrice: true,
+        priceField: 'balance',
+        itemClickSpanName: 'View Account',
+        navLinks: [
+          { href: '/accounts', label: '💰 Accounts' },
+          { href: '/transactions', label: '📊 Transactions' },
+          { href: '/transfer', label: '💸 Transfer' }
+        ],
+        fallbackData: [
+          { id: 1, name: 'Checking Account', balance: 5420.50, icon: '🏦', type: 'Primary checking' },
+          { id: 2, name: 'Savings Account', balance: 12350.00, icon: '💵', type: 'High-yield savings' },
+          { id: 3, name: 'Investment Portfolio', balance: 45000.00, icon: '📈', type: 'Stocks & ETFs' },
+        ]
+      },
+      healthcare: {
+        loadDataSpanName: 'Load Patient Data',
+        apiEndpoint: 'patients',
+        dataKey: 'records',
+        heroTitle: 'Patient Portal',
+        heroSubtitle: 'Your health information at your fingertips',
+        itemIcon: 'icon',
+        defaultIcon: '🏥',
+        itemTitle: 'title',
+        itemSubtitle: 'description',
+        showPrice: false,
+        priceField: '',
+        itemClickSpanName: 'View Record',
+        navLinks: [
+          { href: '/records', label: '📋 Records' },
+          { href: '/appointments', label: '📅 Appointments' },
+          { href: '/prescriptions', label: '💊 Prescriptions' }
+        ],
+        fallbackData: [
+          { id: 1, title: 'Recent Checkup', icon: '🩺', description: 'Annual physical - Jan 2024' },
+          { id: 2, title: 'Lab Results', icon: '🔬', description: 'Blood work - Normal' },
+          { id: 3, title: 'Upcoming Appointment', icon: '📅', description: 'Dr. Smith - Feb 15' },
+        ]
+      },
+      saas: {
+        loadDataSpanName: 'Load Projects',
+        apiEndpoint: 'projects',
+        dataKey: 'projects',
+        heroTitle: 'Your Dashboard',
+        heroSubtitle: 'Manage your projects and workflows',
+        itemIcon: 'icon',
+        defaultIcon: '📁',
+        itemTitle: 'name',
+        itemSubtitle: 'status',
+        showPrice: false,
+        priceField: '',
+        itemClickSpanName: 'View Project',
+        navLinks: [
+          { href: '/projects', label: '📁 Projects' },
+          { href: '/team', label: '👥 Team' },
+          { href: '/settings', label: '⚙️ Settings' }
+        ],
+        fallbackData: [
+          { id: 1, name: 'Website Redesign', icon: '🎨', status: 'In Progress - 75%' },
+          { id: 2, name: 'Mobile App', icon: '📱', status: 'Planning Phase' },
+          { id: 3, name: 'API Integration', icon: '🔗', status: 'Completed' },
+        ]
+      },
+      gaming: {
+        loadDataSpanName: 'Load Games',
+        apiEndpoint: 'games',
+        dataKey: 'games',
+        heroTitle: 'Game Lobby',
+        heroSubtitle: 'Find your next adventure',
+        itemIcon: 'icon',
+        defaultIcon: '🎮',
+        itemTitle: 'name',
+        itemSubtitle: 'players',
+        showPrice: false,
+        priceField: '',
+        itemClickSpanName: 'View Game',
+        navLinks: [
+          { href: '/games', label: '🎮 Games' },
+          { href: '/leaderboard', label: '🏆 Leaderboard' },
+          { href: '/profile', label: '👤 Profile' }
+        ],
+        fallbackData: [
+          { id: 1, name: 'Space Adventure', icon: '🚀', players: '1.2k players online' },
+          { id: 2, name: 'Fantasy Quest', icon: '⚔️', players: '856 players online' },
+          { id: 3, name: 'Racing Pro', icon: '🏎️', players: '2.3k players online' },
+        ]
+      },
+      media: {
+        loadDataSpanName: 'Load Content',
+        apiEndpoint: 'content',
+        dataKey: 'items',
+        heroTitle: 'Trending Now',
+        heroSubtitle: 'Discover the latest content',
+        itemIcon: 'thumbnail',
+        defaultIcon: '🎬',
+        itemTitle: 'title',
+        itemSubtitle: 'category',
+        showPrice: false,
+        priceField: '',
+        itemClickSpanName: 'View Content',
+        navLinks: [
+          { href: '/browse', label: '🎬 Browse' },
+          { href: '/library', label: '📚 Library' },
+          { href: '/watchlist', label: '⭐ Watchlist' }
+        ],
+        fallbackData: [
+          { id: 1, title: 'Documentary: Tech Giants', thumbnail: '🎥', category: 'Documentary • 2h 15m' },
+          { id: 2, title: 'Comedy Special', thumbnail: '😂', category: 'Comedy • 1h 30m' },
+          { id: 3, title: 'Action Movie', thumbnail: '💥', category: 'Action • 2h 5m' },
+        ]
+      },
+      other: {
+        loadDataSpanName: 'Load Data',
+        apiEndpoint: 'items',
+        dataKey: 'items',
+        heroTitle: 'Welcome to ' + projectName,
+        heroSubtitle: 'Your application dashboard',
+        itemIcon: 'icon',
+        defaultIcon: '📊',
+        itemTitle: 'name',
+        itemSubtitle: 'description',
+        showPrice: false,
+        priceField: '',
+        itemClickSpanName: 'View Item',
+        navLinks: [
+          { href: '/dashboard', label: '📊 Dashboard' },
+          { href: '/data', label: '📁 Data' },
+          { href: '/settings', label: '⚙️ Settings' }
+        ],
+        fallbackData: [
+          { id: 1, name: 'Item One', icon: '📌', description: 'First sample item' },
+          { id: 2, name: 'Item Two', icon: '📎', description: 'Second sample item' },
+          { id: 3, name: 'Item Three', icon: '📍', description: 'Third sample item' },
+        ]
+      }
+    };
+
+    return configs[vertical] || configs.other;
+  }
+
+  private getSecondaryPageConfig(vertical: string, projectName: string): any {
+    const configs: Record<string, any> = {
+      ecommerce: {
+        directory: 'cart',
+        pageTitle: 'Shopping Cart',
+        loadSpanName: 'Load Cart',
+        endpoint: 'cart',
+        dataKey: 'items',
+        defaultIcon: '🛒',
+        titleField: 'name',
+        subtitleField: 'description',
+        actionOp: 'cart.checkout',
+        actionName: 'Checkout Item',
+        actionEndpoint: 'checkout',
+        actionLabel: 'Buy Now',
+        fallbackData: [
+          { id: 1, name: 'Premium Headphones', description: '$99.99 × 1', icon: '🎧' },
+          { id: 2, name: 'Smart Watch', description: '$149.99 × 2', icon: '⌚' },
+        ]
+      },
+      fintech: {
+        directory: 'transactions',
+        pageTitle: 'Recent Transactions',
+        loadSpanName: 'Load Transactions',
+        endpoint: 'transactions',
+        dataKey: 'transactions',
+        defaultIcon: '💳',
+        titleField: 'description',
+        subtitleField: 'amount',
+        actionOp: 'transaction.view',
+        actionName: 'View Transaction',
+        actionEndpoint: 'transaction/view',
+        actionLabel: 'Details',
+        fallbackData: [
+          { id: 1, description: 'Coffee Shop', amount: '-$4.50', icon: '☕' },
+          { id: 2, description: 'Salary Deposit', amount: '+$3,500.00', icon: '💰' },
+          { id: 3, description: 'Electric Bill', amount: '-$120.00', icon: '⚡' },
+        ]
+      },
+      healthcare: {
+        directory: 'appointments',
+        pageTitle: 'Your Appointments',
+        loadSpanName: 'Load Appointments',
+        endpoint: 'appointments',
+        dataKey: 'appointments',
+        defaultIcon: '📅',
+        titleField: 'title',
+        subtitleField: 'datetime',
+        actionOp: 'appointment.manage',
+        actionName: 'Manage Appointment',
+        actionEndpoint: 'appointment/manage',
+        actionLabel: 'Reschedule',
+        fallbackData: [
+          { id: 1, title: 'Dr. Smith - Checkup', datetime: 'Feb 15, 2024 at 10:00 AM', icon: '🩺' },
+          { id: 2, title: 'Lab Work', datetime: 'Feb 20, 2024 at 8:30 AM', icon: '🔬' },
+        ]
+      },
+      saas: {
+        directory: 'projects',
+        pageTitle: 'Your Projects',
+        loadSpanName: 'Load Projects',
+        endpoint: 'projects',
+        dataKey: 'projects',
+        defaultIcon: '📁',
+        titleField: 'name',
+        subtitleField: 'status',
+        actionOp: 'project.open',
+        actionName: 'Open Project',
+        actionEndpoint: 'project/open',
+        actionLabel: 'Open',
+        fallbackData: [
+          { id: 1, name: 'Website Redesign', status: 'In Progress', icon: '🎨' },
+          { id: 2, name: 'Mobile App', status: 'Planning', icon: '📱' },
+        ]
+      },
+      gaming: {
+        directory: 'leaderboard',
+        pageTitle: 'Leaderboard',
+        loadSpanName: 'Load Leaderboard',
+        endpoint: 'leaderboard',
+        dataKey: 'players',
+        defaultIcon: '🏆',
+        titleField: 'name',
+        subtitleField: 'score',
+        actionOp: 'player.challenge',
+        actionName: 'Challenge Player',
+        actionEndpoint: 'challenge',
+        actionLabel: 'Challenge',
+        fallbackData: [
+          { id: 1, name: 'ProGamer99', score: '15,420 pts', icon: '🥇' },
+          { id: 2, name: 'NinjaPlayer', score: '14,890 pts', icon: '🥈' },
+          { id: 3, name: 'GameMaster', score: '13,200 pts', icon: '🥉' },
+        ]
+      },
+      media: {
+        directory: 'library',
+        pageTitle: 'Your Library',
+        loadSpanName: 'Load Library',
+        endpoint: 'library',
+        dataKey: 'items',
+        defaultIcon: '🎬',
+        titleField: 'title',
+        subtitleField: 'info',
+        actionOp: 'media.play',
+        actionName: 'Play Content',
+        actionEndpoint: 'play',
+        actionLabel: 'Play',
+        fallbackData: [
+          { id: 1, title: 'Favorite Movie', info: 'Added Jan 2024', icon: '🎥' },
+          { id: 2, title: 'Documentary', info: 'Watch later', icon: '📺' },
+        ]
+      },
+      other: {
+        directory: 'data',
+        pageTitle: 'Data View',
+        loadSpanName: 'Load Data',
+        endpoint: 'data',
+        dataKey: 'items',
+        defaultIcon: '📊',
+        titleField: 'name',
+        subtitleField: 'description',
+        actionOp: 'data.view',
+        actionName: 'View Item',
+        actionEndpoint: 'view',
+        actionLabel: 'View',
+        fallbackData: [
+          { id: 1, name: 'Item One', description: 'Sample data', icon: '📌' },
+          { id: 2, name: 'Item Two', description: 'Sample data', icon: '📎' },
+        ]
+      }
+    };
+
+    return configs[vertical] || configs.other;
+  }
+
+  private getActionPageConfig(vertical: string): any {
+    const configs: Record<string, any> = {
+      ecommerce: {
+        pageTitle: 'Checkout',
+        submitOp: 'checkout.submit',
+        submitSpanName: 'Submit Order',
+        endpoint: 'checkout',
+        successTitle: 'Order Confirmed!',
+        successMessage: 'Thank you for your purchase.',
+        buttonText: 'Complete Order',
+        directory: 'checkout'
+      },
+      fintech: {
+        pageTitle: 'Transfer Funds',
+        submitOp: 'transfer.submit',
+        submitSpanName: 'Submit Transfer',
+        endpoint: 'transfer',
+        successTitle: 'Transfer Complete!',
+        successMessage: 'Your transfer has been processed.',
+        buttonText: 'Send Transfer',
+        directory: 'transfer'
+      },
+      healthcare: {
+        pageTitle: 'Book Appointment',
+        submitOp: 'appointment.book',
+        submitSpanName: 'Book Appointment',
+        endpoint: 'appointments',
+        successTitle: 'Appointment Booked!',
+        successMessage: 'Your appointment has been scheduled.',
+        buttonText: 'Confirm Booking',
+        directory: 'book'
+      },
+      saas: {
+        pageTitle: 'Create Project',
+        submitOp: 'project.create',
+        submitSpanName: 'Create Project',
+        endpoint: 'projects',
+        successTitle: 'Project Created!',
+        successMessage: 'Your new project is ready.',
+        buttonText: 'Create Project',
+        directory: 'create'
+      },
+      gaming: {
+        pageTitle: 'Join Game',
+        submitOp: 'game.join',
+        submitSpanName: 'Join Game',
+        endpoint: 'games/join',
+        successTitle: 'Joined Game!',
+        successMessage: 'You have joined the game.',
+        buttonText: 'Join Now',
+        directory: 'join'
+      },
+      media: {
+        pageTitle: 'Subscribe',
+        submitOp: 'subscription.create',
+        submitSpanName: 'Create Subscription',
+        endpoint: 'subscribe',
+        successTitle: 'Subscribed!',
+        successMessage: 'Welcome to premium content.',
+        buttonText: 'Subscribe Now',
+        directory: 'subscribe'
+      },
+      other: {
+        pageTitle: 'Submit',
+        submitOp: 'form.submit',
+        submitSpanName: 'Submit Form',
+        endpoint: 'submit',
+        successTitle: 'Submitted!',
+        successMessage: 'Your submission was successful.',
+        buttonText: 'Submit',
+        directory: 'submit'
+      }
+    };
+
+    return configs[vertical] || configs.other;
+  }
+
   private generateFrontendPages(frontendPath: string, project: EngagementSpec): void {
     const appPath = path.join(frontendPath, 'app');
+    const vertical = project.project.vertical;
 
-    // Home page with enhanced styling
-    const homePage = `import * as Sentry from '@sentry/nextjs';
+    // Generate vertical-specific pages
+    const pageConfig = this.getVerticalPageConfig(vertical, project.project.name);
+
+    // Home page that fetches from backend API
+    const homePage = `'use client';
+import * as Sentry from '@sentry/nextjs';
 import Link from 'next/link';
+import { useEffect, useState } from 'react';
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
 export default function Home() {
-  // TODO: Customize this template based on your project requirements
-  // See README.md and IMPLEMENTATION_GUIDE.md for details
-  
-  const products = [
-    { id: 1, name: 'Premium Headphones', price: 99.99, image: '🎧', description: 'Wireless noise-cancelling' },
-    { id: 2, name: 'Smart Watch', price: 149.99, image: '⌚', description: 'Fitness tracking & notifications' },
-    { id: 3, name: 'Laptop Stand', price: 199.99, image: '💻', description: 'Ergonomic aluminum design' },
-    { id: 4, name: 'Mechanical Keyboard', price: 129.99, image: '⌨️', description: 'RGB backlit switches' },
-    { id: 5, name: 'Wireless Mouse', price: 49.99, image: '🖱️', description: 'High precision sensor' },
-    { id: 6, name: 'USB-C Hub', price: 79.99, image: '🔌', description: '7-in-1 multiport adapter' },
-  ];
+  const [data, setData] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    loadData();
+  }, []);
+
+  const loadData = async () => {
+    setLoading(true);
+    try {
+      await Sentry.startSpan(
+        { op: 'http.client', name: '${pageConfig.loadDataSpanName}' },
+        async () => {
+          const response = await fetch(\`\${API_URL}/api/${pageConfig.apiEndpoint}\`);
+          if (!response.ok) throw new Error('Failed to load data');
+          const result = await response.json();
+          setData(result.${pageConfig.dataKey} || result || []);
+        }
+      );
+    } catch (err) {
+      console.error('Error loading data:', err);
+      Sentry.captureException(err);
+      setError('Failed to load data');
+      setData(${JSON.stringify(pageConfig.fallbackData)});
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-600"></div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-purple-50 to-blue-50">
-      {/* Header */}
       <header className="bg-white shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <h1 className="text-3xl font-bold text-purple-600">${project.project.name}</h1>
-              <p className="text-sm text-gray-500 mt-1">Sentry-instrumented demo store</p>
-            </div>
-            <Link href="/cart" className="btn btn-primary flex items-center gap-2">
-              🛒 Cart
-            </Link>
-          </div>
+        <div className="max-w-7xl mx-auto px-4 py-4 flex justify-between items-center">
+          <h1 className="text-3xl font-bold text-purple-600">${project.project.name}</h1>
+          <nav className="flex gap-4">
+            ${pageConfig.navLinks.map((link: any) => `<Link href="${link.href}" className="text-purple-600 hover:text-purple-800">${link.label}</Link>`).join('\n            ')}
+          </nav>
         </div>
       </header>
 
-      {/* Hero Section */}
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
-        <div className="text-center mb-12">
-          <h2 className="text-4xl font-bold text-gray-900 mb-4">
-            Welcome to Our Store
-          </h2>
-          <p className="text-xl text-gray-600 max-w-2xl mx-auto">
-            Discover amazing products with real-time performance monitoring powered by Sentry
-          </p>
-        </div>
-
-        {/* Products Grid */}
-        {/* TODO: Customize product display based on your requirements
-            Example: Show bid count, current bid, auction end time, etc. */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {products.map((product) => (
-            <Link 
-              key={product.id}
-              href={\`/product/\${product.id}\`}
-              className="card group"
-            >
-              <div className="p-6">
-                <div className="text-6xl mb-4 group-hover:scale-110 transition-transform duration-200">
-                  {product.image}
-                </div>
-                <h3 className="text-xl font-semibold text-gray-900 mb-2">
-                  {product.name}
-                </h3>
-                <p className="text-gray-600 text-sm mb-4">
-                  {product.description}
-                </p>
-                <div className="flex items-center justify-between">
-                  <span className="text-2xl font-bold text-purple-600">
-                    \${product.price}
-                  </span>
-                  <span className="text-sm text-purple-600 font-medium group-hover:translate-x-1 transition-transform">
-                    View Details →
-                  </span>
-                </div>
-              </div>
-            </Link>
+      <main className="max-w-7xl mx-auto px-4 py-12">
+        <h2 className="text-4xl font-bold text-center mb-4">${pageConfig.heroTitle}</h2>
+        <p className="text-xl text-gray-600 text-center mb-12">${pageConfig.heroSubtitle}</p>
+        
+        {error && <p className="text-center text-orange-600 mb-4">{error} (showing demo data)</p>}
+        
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          {data.map((item: any, index: number) => (
+            <div key={item.id || index} className="bg-white rounded-lg shadow-md p-6 hover:shadow-lg transition cursor-pointer"
+                 onClick={() => Sentry.startSpan({ op: 'ui.click', name: '${pageConfig.itemClickSpanName}' }, () => {})}>
+              <div className="text-5xl mb-4">{item.${pageConfig.itemIcon} || '${pageConfig.defaultIcon}'}</div>
+              <h3 className="text-xl font-semibold mb-2">{item.${pageConfig.itemTitle}}</h3>
+              <p className="text-gray-600 mb-4">{item.${pageConfig.itemSubtitle}}</p>
+              ${pageConfig.showPrice ? `<span className="text-2xl font-bold text-purple-600">\${item.${pageConfig.priceField}}</span>` : ''}
+            </div>
           ))}
         </div>
       </main>
-
-      {/* Footer */}
-      <footer className="bg-white mt-16 border-t">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-          <p className="text-center text-gray-500 text-sm">
-            © 2024 ${project.project.name} • Powered by Sentry
-          </p>
-        </div>
-      </footer>
     </div>
   );
 }
 `;
     fs.writeFileSync(path.join(appPath, 'page.tsx'), homePage);
 
-    // Cart page with enhanced styling
-    const cartPage = `'use client';
+    // Generic data page that fetches details from backend API
+    const secondaryConfig = this.getSecondaryPageConfig(vertical, project.project.name);
+    const dataPage = `'use client';
 import * as Sentry from '@sentry/nextjs';
 import Link from 'next/link';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 
-export default function Cart() {
-  const [items, setItems] = useState([
-    { id: 1, name: 'Premium Headphones', price: 99.99, quantity: 1, image: '🎧' },
-    { id: 2, name: 'Smart Watch', price: 149.99, quantity: 2, image: '⌚' },
-  ]);
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
-  const updateQuantity = (id: number, delta: number) => {
-    setItems(items.map(item => 
-      item.id === id 
-        ? { ...item, quantity: Math.max(0, item.quantity + delta) }
-        : item
-    ).filter(item => item.quantity > 0));
+export default function DataPage() {
+  const [data, setData] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    loadData();
+  }, []);
+
+  const loadData = async () => {
+    try {
+      await Sentry.startSpan(
+        { op: 'http.client', name: '${secondaryConfig.loadSpanName}' },
+        async () => {
+          const response = await fetch(\`\${API_URL}/api/${secondaryConfig.endpoint}\`);
+          if (response.ok) {
+            const result = await response.json();
+            setData(result.${secondaryConfig.dataKey} || result || []);
+          } else {
+            setData(${JSON.stringify(secondaryConfig.fallbackData)});
+          }
+        }
+      );
+    } catch (err) {
+      Sentry.captureException(err);
+      setData(${JSON.stringify(secondaryConfig.fallbackData)});
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const subtotal = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
-  const tax = subtotal * 0.08;
-  const total = subtotal + tax;
+  const handleAction = async (item: any) => {
+    await Sentry.startSpan(
+      { op: '${secondaryConfig.actionOp}', name: '${secondaryConfig.actionName}' },
+      async () => {
+        try {
+          await fetch(\`\${API_URL}/api/${secondaryConfig.actionEndpoint}\`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ itemId: item.id })
+          });
+        } catch (err) {
+          Sentry.captureException(err);
+        }
+      }
+    );
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-600"></div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-purple-50 to-blue-50">
-      {/* Header */}
       <header className="bg-white shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-          <Link href="/" className="text-purple-600 hover:text-purple-700 font-medium">
-            ← Back to Store
-          </Link>
+        <div className="max-w-7xl mx-auto px-4 py-4">
+          <Link href="/" className="text-purple-600 font-medium">← Back to Home</Link>
         </div>
       </header>
 
-      <main className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
-        <h1 className="text-4xl font-bold text-gray-900 mb-8">Shopping Cart</h1>
+      <main className="max-w-4xl mx-auto px-4 py-12">
+        <h1 className="text-4xl font-bold mb-8">${secondaryConfig.pageTitle}</h1>
         
-        {items.length === 0 ? (
+        {data.length === 0 ? (
           <div className="bg-white rounded-lg shadow-md p-12 text-center">
-            <p className="text-xl text-gray-600 mb-6">Your cart is empty</p>
-            <Link href="/" className="btn btn-primary">
-              Continue Shopping
-            </Link>
+            <p className="text-xl text-gray-600 mb-6">No data available</p>
+            <Link href="/" className="bg-purple-600 text-white px-6 py-2 rounded-lg">Go Home</Link>
           </div>
         ) : (
-          <div className="grid gap-8 lg:grid-cols-3">
-            {/* Cart Items */}
-            <div className="lg:col-span-2 space-y-4">
-              {items.map(item => (
-                <div key={item.id} className="card">
-                  <div className="p-6 flex items-center gap-6">
-                    <div className="text-5xl">{item.image}</div>
-                    <div className="flex-1">
-                      <h3 className="text-lg font-semibold text-gray-900 mb-1">
-                        {item.name}
-                      </h3>
-                      <p className="text-2xl font-bold text-purple-600">
-                        \${item.price.toFixed(2)}
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <button
-                        onClick={() => updateQuantity(item.id, -1)}
-                        className="w-8 h-8 rounded-full bg-gray-200 hover:bg-gray-300 flex items-center justify-center"
-                      >
-                        −
-                      </button>
-                      <span className="text-lg font-semibold w-8 text-center">
-                        {item.quantity}
-                      </span>
-                      <button
-                        onClick={() => updateQuantity(item.id, 1)}
-                        className="w-8 h-8 rounded-full bg-purple-600 hover:bg-purple-700 text-white flex items-center justify-center"
-                      >
-                        +
-                      </button>
-                    </div>
-                    <div className="text-right">
-                      <p className="text-sm text-gray-500 mb-1">Subtotal</p>
-                      <p className="text-xl font-bold text-gray-900">
-                        \${(item.price * item.quantity).toFixed(2)}
-                      </p>
-                    </div>
-                  </div>
+          <div className="space-y-4">
+            {data.map((item: any, index: number) => (
+              <div key={item.id || index} className="bg-white rounded-lg shadow-md p-6 flex items-center gap-6">
+                <div className="text-5xl">{item.icon || item.image || '${secondaryConfig.defaultIcon}'}</div>
+                <div className="flex-1">
+                  <h3 className="text-lg font-semibold">{item.${secondaryConfig.titleField}}</h3>
+                  <p className="text-gray-600">{item.${secondaryConfig.subtitleField}}</p>
                 </div>
-              ))}
-            </div>
-
-            {/* Order Summary */}
-            <div className="lg:col-span-1">
-              <div className="card sticky top-8">
-                <div className="p-6">
-                  <h2 className="text-xl font-bold text-gray-900 mb-6">Order Summary</h2>
-                  
-                  <div className="space-y-3 mb-6">
-                    <div className="flex justify-between text-gray-600">
-                      <span>Subtotal</span>
-                      <span>\${subtotal.toFixed(2)}</span>
-                    </div>
-                    <div className="flex justify-between text-gray-600">
-                      <span>Tax (8%)</span>
-                      <span>\${tax.toFixed(2)}</span>
-                    </div>
-                    <div className="border-t pt-3 flex justify-between text-xl font-bold">
-                      <span>Total</span>
-                      <span className="text-purple-600">\${total.toFixed(2)}</span>
-                    </div>
-                  </div>
-
-                  <Link href="/checkout" className="btn btn-primary w-full text-center block mb-3">
-                    Proceed to Checkout
-                  </Link>
-                  
-                  <Link href="/" className="btn btn-secondary w-full text-center block">
-                    Continue Shopping
-                  </Link>
-                </div>
+                <button 
+                  onClick={() => handleAction(item)}
+                  className="bg-purple-600 text-white px-4 py-2 rounded-lg hover:bg-purple-700"
+                >
+                  ${secondaryConfig.actionLabel}
+                </button>
               </div>
-            </div>
+            ))}
           </div>
         )}
       </main>
@@ -677,182 +1285,125 @@ export default function Cart() {
   );
 }
 `;
-    fs.writeFileSync(path.join(appPath, 'cart', 'page.tsx'), cartPage);
+    // Create the appropriate directory based on vertical
+    const secondaryDir = path.join(appPath, secondaryConfig.directory);
+    if (!fs.existsSync(secondaryDir)) {
+      fs.mkdirSync(secondaryDir, { recursive: true });
+    }
+    fs.writeFileSync(path.join(secondaryDir, 'page.tsx'), dataPage);
 
-    // Checkout page with enhanced styling
+    // Generic action/checkout page that posts to backend API
+    const actionConfig = this.getActionPageConfig(vertical);
     const checkoutPage = `'use client';
 import * as Sentry from '@sentry/nextjs';
 import { useState } from 'react';
-import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 
-export default function Checkout() {
-  const router = useRouter();
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+
+export default function ActionPage() {
   const [loading, setLoading] = useState(false);
+  const [success, setSuccess] = useState(false);
   const [formData, setFormData] = useState({
-    email: '',
-    cardNumber: '',
     name: '',
-    address: '',
-    city: '',
-    zipCode: ''
+    email: '',
+    details: ''
   });
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     
-    const span = Sentry.startSpan({ op: 'checkout.submit', name: 'Submit Checkout Form' }, async () => {
-      try {
-        const response = await fetch(process.env.NEXT_PUBLIC_API_URL + '/api/checkout', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(formData)
-        });
+    try {
+      await Sentry.startSpan(
+        { op: '${actionConfig.submitOp}', name: '${actionConfig.submitSpanName}' },
+        async () => {
+          const response = await fetch(\`\${API_URL}/api/${actionConfig.endpoint}\`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(formData)
+          });
 
-        if (response.ok) {
-          const data = await response.json();
-          router.push('/order/' + data.orderId);
-        } else {
-          throw new Error('Checkout failed');
+          if (response.ok) {
+            setSuccess(true);
+          } else {
+            throw new Error('Submission failed');
+          }
         }
-      } catch (error) {
-        Sentry.captureException(error);
-        alert('Checkout failed. Please try again.');
-      } finally {
-        setLoading(false);
-      }
-    });
+      );
+    } catch (error) {
+      Sentry.captureException(error);
+      // Show success anyway for demo purposes
+      setSuccess(true);
+    } finally {
+      setLoading(false);
+    }
   };
+
+  if (success) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-purple-50 to-blue-50">
+        <div className="bg-white rounded-lg shadow-md p-12 text-center max-w-md">
+          <div className="text-6xl mb-4">✅</div>
+          <h1 className="text-2xl font-bold mb-4">${actionConfig.successTitle}</h1>
+          <p className="text-gray-600 mb-6">${actionConfig.successMessage}</p>
+          <Link href="/" className="bg-purple-600 text-white px-6 py-2 rounded-lg">Back to Home</Link>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-purple-50 to-blue-50">
-      {/* Header */}
       <header className="bg-white shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-          <Link href="/cart" className="text-purple-600 hover:text-purple-700 font-medium">
-            ← Back to Cart
-          </Link>
+        <div className="max-w-7xl mx-auto px-4 py-4">
+          <Link href="/" className="text-purple-600 font-medium">← Back to Home</Link>
         </div>
       </header>
 
-      <main className="max-w-2xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
-        <div className="mb-8">
-          <h1 className="text-4xl font-bold text-gray-900 mb-2">Checkout</h1>
-          <p className="text-gray-600">Complete your order securely</p>
-        </div>
+      <main className="max-w-2xl mx-auto px-4 py-12">
+        <h1 className="text-4xl font-bold mb-8">${actionConfig.pageTitle}</h1>
         
-        <div className="card">
-          <form onSubmit={handleSubmit} className="p-8 space-y-6">
-            {/* Contact Information */}
+        <div className="bg-white rounded-lg shadow-md p-8">
+          <form onSubmit={handleSubmit} className="space-y-6">
             <div>
-              <h2 className="text-xl font-semibold text-gray-900 mb-4">Contact Information</h2>
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Email Address
-                  </label>
-                  <input
-                    type="email"
-                    value={formData.email}
-                    onChange={e => setFormData({ ...formData, email: e.target.value })}
-                    className="input"
-                    placeholder="you@example.com"
-                    required
-                  />
-                </div>
-              </div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Name</label>
+              <input
+                type="text"
+                value={formData.name}
+                onChange={e => setFormData({ ...formData, name: e.target.value })}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
+                placeholder="Your name"
+                required
+              />
             </div>
-
-            {/* Shipping Address */}
             <div>
-              <h2 className="text-xl font-semibold text-gray-900 mb-4">Shipping Address</h2>
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Full Name
-                  </label>
-                  <input
-                    type="text"
-                    value={formData.name}
-                    onChange={e => setFormData({ ...formData, name: e.target.value })}
-                    className="input"
-                    placeholder="John Doe"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Street Address
-                  </label>
-                  <input
-                    type="text"
-                    value={formData.address}
-                    onChange={e => setFormData({ ...formData, address: e.target.value })}
-                    className="input"
-                    placeholder="123 Main St"
-                    required
-                  />
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      City
-                    </label>
-                    <input
-                      type="text"
-                      value={formData.city}
-                      onChange={e => setFormData({ ...formData, city: e.target.value })}
-                      className="input"
-                      placeholder="San Francisco"
-                      required
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      ZIP Code
-                    </label>
-                    <input
-                      type="text"
-                      value={formData.zipCode}
-                      onChange={e => setFormData({ ...formData, zipCode: e.target.value })}
-                      className="input"
-                      placeholder="94102"
-                      required
-                    />
-                  </div>
-                </div>
-              </div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Email</label>
+              <input
+                type="email"
+                value={formData.email}
+                onChange={e => setFormData({ ...formData, email: e.target.value })}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
+                placeholder="you@example.com"
+                required
+              />
             </div>
-
-            {/* Payment Information */}
             <div>
-              <h2 className="text-xl font-semibold text-gray-900 mb-4">Payment Information</h2>
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Card Number
-                  </label>
-                  <input
-                    type="text"
-                    value={formData.cardNumber}
-                    onChange={e => setFormData({ ...formData, cardNumber: e.target.value })}
-                    className="input"
-                    placeholder="4242 4242 4242 4242"
-                    maxLength={19}
-                    required
-                  />
-                </div>
-              </div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Details</label>
+              <textarea
+                value={formData.details}
+                onChange={e => setFormData({ ...formData, details: e.target.value })}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
+                placeholder="Additional details..."
+                rows={4}
+              />
             </div>
-
-            {/* Submit Button */}
             <button 
               type="submit" 
               disabled={loading}
-              className="btn btn-primary w-full text-lg py-4 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="w-full bg-purple-600 text-white py-3 rounded-lg font-medium hover:bg-purple-700 disabled:opacity-50"
             >
-              {loading ? 'Processing...' : '🔒 Complete Order'}
+              {loading ? 'Processing...' : '${actionConfig.buttonText}'}
             </button>
           </form>
         </div>
@@ -861,7 +1412,12 @@ export default function Checkout() {
   );
 }
 `;
-    fs.writeFileSync(path.join(appPath, 'checkout', 'page.tsx'), checkoutPage);
+    // Create the action page directory
+    const actionDir = path.join(appPath, actionConfig.directory);
+    if (!fs.existsSync(actionDir)) {
+      fs.mkdirSync(actionDir, { recursive: true });
+    }
+    fs.writeFileSync(path.join(actionDir, 'page.tsx'), checkoutPage);
 
     // Product detail page with enhanced styling
     const productPage = `'use client';
@@ -1233,15 +1789,25 @@ export default function RootLayout({
   }
 
   private generateFrontendInstrumentation(frontendPath: string, project: EngagementSpec): void {
-    const frontendSpans = project.instrumentation.spans.filter(s => s.layer === 'frontend');
-    
+    // For web projects, include ALL spans (not just frontend-layer ones).
+    // Backend spans are triggered by frontend form submissions/API calls, so the
+    // frontend instrumentation wraps those calls to propagate distributed tracing context.
+    // Deduplicate by span name — duplicate names cause duplicate function declarations
+    // which are TypeScript errors and break the instrumentation file.
+    const seen = new Set<string>();
+    const spans = project.instrumentation.spans.filter(s => {
+      if (seen.has(s.name)) return false;
+      seen.add(s.name);
+      return true;
+    });
+
     const instrumentationFile = `import * as Sentry from '@sentry/nextjs';
 
 // Custom instrumentation generated from your engagement spec
 // These spans have been designed based on your project requirements
 // Call these functions to track key operations in your application
 
-${frontendSpans.map(span => `
+${spans.map(span => `
 export function trace_${span.name.replace(/\./g, '_')}(
   callback: () => Promise<any>,
   attributes: Record<string, any> = {}
@@ -1273,6 +1839,7 @@ function filterPII(attributes: Record<string, any>, piiKeys: string[]): Record<s
 
   private generateBackendServer(backendPath: string, project: EngagementSpec): void {
     const serverFile = `require('dotenv').config();
+// Import Sentry first to ensure instrumentation
 const Sentry = require('../sentry.config');
 const express = require('express');
 const cors = require('cors');
@@ -1280,18 +1847,36 @@ const cors = require('cors');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Sentry request handler must be the first middleware
-app.use(Sentry.Handlers.requestHandler());
-app.use(Sentry.Handlers.tracingHandler());
-
-app.use(cors());
+// CORS and JSON parsing
+app.use(cors({
+  origin: ['http://localhost:3000', 'http://localhost:3001'],
+  credentials: true,
+  // Allow Sentry distributed tracing headers so frontend→backend traces connect
+  allowedHeaders: ['Content-Type', 'Authorization', 'sentry-trace', 'baggage'],
+}));
 app.use(express.json());
+
+// Health check endpoint (for live data generator)
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', service: '${project.project.name}-backend' });
+});
+
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({ message: 'Welcome to ${project.project.name} API', status: 'healthy' });
+});
 
 // Routes
 app.use('/api', require('./routes/api'));
 
-// Sentry error handler must be before other error middleware
-app.use(Sentry.Handlers.errorHandler());
+// Sentry error handler must come before other error handlers
+Sentry.setupExpressErrorHandler(app);
+
+// Generic error handling middleware
+app.use((err, req, res, next) => {
+  console.error('Error:', err);
+  res.status(500).json({ error: 'Internal server error' });
+});
 
 app.listen(PORT, () => {
   console.log(\`Backend running on port \${PORT}\`);
@@ -1312,8 +1897,12 @@ PORT=3001
 
     try {
       console.log('📝 Generating routes with LLM...');
-      const { code } = await this.llm.generateExpressRoutes(project);
+      let { code } = await this.llm.generateExpressRoutes(project);
       console.log('✅ LLM generated Express routes');
+
+      // Sanitize unquoted dot-notation object keys (e.g. { http.method: value } → { 'http.method': value })
+      // These are valid OTel semantic convention attribute names but invalid as unquoted JS keys.
+      code = code.replace(/([{,]\s*)([a-zA-Z][a-zA-Z0-9]*(?:\.[a-zA-Z][a-zA-Z0-9]*)+)\s*:/g, "$1'$2':");
 
       // Write routes file
       fs.writeFileSync(path.join(backendPath, 'src', 'routes', 'api.ts'), code);
@@ -1327,42 +1916,56 @@ PORT=3001
   }
 
   private generateBackendRoutes(backendPath: string, project: EngagementSpec): void {
+    const backendSpans = project.instrumentation.spans.filter(s => s.layer === 'backend');
+
+    // Build import list from actual spans
+    const spanFnNames = backendSpans.map(s => `trace_${s.name.replace(/\./g, '_')}`);
+    const importsLine = spanFnNames.length > 0
+      ? `const { ${spanFnNames.join(', ')} } = require('../utils/instrumentation');`
+      : `// No backend spans defined — add instrumentation below`;
+
+    // Generate one route per backend span
+    const spanRoutes = backendSpans.map(span => {
+      const fnName = `trace_${span.name.replace(/\./g, '_')}`;
+      const routePath = `/${span.op.toLowerCase().replace(/[^a-z0-9]/g, '-')}`;
+      const attrEntries = Object.keys(span.attributes)
+        .map(k => {
+          // Quote keys with dots (OTel conventions like 'http.method') — unquoted are JS syntax errors
+          const quotedKey = k.includes('.') ? `'${k}'` : k;
+          return `      ${quotedKey}: req.body.${k.replace(/\./g, '_')} || req.query.${k.replace(/\./g, '_')} || null`;
+        })
+        .join(',\n');
+      const attrObj = attrEntries ? `{\n${attrEntries}\n    }` : '{}';
+      const isGet = ['load', 'fetch', 'get', 'list', 'read', 'query', 'search'].some(v => span.op.toLowerCase().includes(v));
+      const method = isGet ? 'get' : 'post';
+
+      return `
+router.${method}('${routePath}', async (req, res) => {
+  try {
+    const result = await ${fnName}(async () => {
+      // ${span.description || `Handles ${span.name}`}
+      await new Promise(resolve => setTimeout(resolve, Math.floor(Math.random() * 300) + 50));
+      return { id: Date.now(), status: 'ok', operation: '${span.name}' };
+    }, ${attrObj});
+    res.json({ success: true, ...result });
+  } catch (error) {
+    Sentry.captureException(error);
+    res.status(500).json({ error: '${span.name} failed' });
+  }
+});`;
+    }).join('\n');
+
     const routesFile = `const express = require('express');
 const router = express.Router();
 const Sentry = require('@sentry/node');
-const { traceCheckout } = require('../utils/instrumentation');
+${importsLine}
 
-// TODO: Customize these API endpoints based on your project requirements
-// See README.md and IMPLEMENTATION_GUIDE.md for your specific use case
-// Example: Add bidding endpoints, auction management, real-time updates, etc.
-
-router.get('/products', (req, res) => {
-  const products = [
-    { id: 1, name: 'Product 1', price: 99.99 },
-    { id: 2, name: 'Product 2', price: 149.99 },
-    { id: 3, name: 'Product 3', price: 199.99 }
-  ];
-  res.json(products);
-});
-
-router.post('/checkout', async (req, res) => {
-  try {
-    await traceCheckout(async () => {
-      // Simulate checkout processing
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      const orderId = Math.random().toString(36).substring(7);
-      res.json({ success: true, orderId });
-    }, {
-      cart_items: 1,
-      total_amount: 99.99,
-      customer_email: req.body.email
-    });
-  } catch (error) {
-    Sentry.captureException(error);
-    res.status(500).json({ error: 'Checkout failed' });
-  }
-});
+// Routes generated from instrumentation spec for: ${project.project.name}
+// TODO: Replace the stub implementations below with real business logic
+${spanRoutes || `
+router.get('/status', (req, res) => {
+  res.json({ status: 'ok', project: '${project.project.name}' });
+});`}
 
 module.exports = router;
 `;
@@ -1371,14 +1974,17 @@ module.exports = router;
 
   private generateBackendInstrumentation(backendPath: string, project: EngagementSpec): void {
     const backendSpans = project.instrumentation.spans.filter(s => s.layer === 'backend');
-    
+    // Also include frontend spans so backend routes (derived from frontend span names) can import them
+    const frontendSpans = project.instrumentation.spans.filter(s => s.layer === 'frontend');
+    const allSpans = [...backendSpans, ...frontendSpans];
+
     const instrumentationFile = `const Sentry = require('@sentry/node');
 
 // Custom instrumentation generated from your engagement spec
 // These spans have been designed based on your project requirements
 // Call these functions to track key operations in your application
 
-${backendSpans.map(span => `
+${allSpans.map(span => `
 exports.trace_${span.name.replace(/\./g, '_')} = function(
   callback,
   attributes = {}
@@ -1484,6 +2090,283 @@ This app includes custom Sentry instrumentation:
 See IMPLEMENTATION_GUIDE.md for details.
 `;
     fs.writeFileSync(path.join(appPath, 'README.md'), readme);
+  }
+
+  private generateUserFlows(outputPath: string, project: EngagementSpec): void {
+    const flowsPath = path.join(outputPath, 'user-flows.json');
+    const appPath = path.join(outputPath, 'reference-app');
+
+    // Scan actual generated page routes from the filesystem
+    const pageRoutes = this.scanGeneratedPageRoutes(appPath, project);
+
+    const flows = this.buildSpanDrivenFlows(project, pageRoutes);
+
+    fs.writeFileSync(flowsPath, JSON.stringify(flows, null, 2));
+  }
+
+  /**
+   * Scan the generated Next.js app directory to find all page routes.
+   */
+  private scanGeneratedPageRoutes(appPath: string, project: EngagementSpec): string[] {
+    const routes: string[] = [];
+
+    if (project.stack.type === 'backend-only') return routes;
+
+    const pagesDir = path.join(appPath, 'frontend', 'app');
+    if (!fs.existsSync(pagesDir)) return routes;
+
+    const scanDir = (dir: string, prefix: string) => {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        // Skip Next.js internals and non-route directories
+        if (entry.name.startsWith('_') || entry.name.startsWith('.') ||
+            ['globals.css', 'layout.tsx', 'loading.tsx', 'error.tsx', 'not-found.tsx'].includes(entry.name)) {
+          continue;
+        }
+        if (entry.isDirectory()) {
+          // Dynamic route segments like [id] — skip for simplicity
+          if (entry.name.startsWith('[')) continue;
+          const subDir = path.join(dir, entry.name);
+          const pageFile = path.join(subDir, 'page.tsx');
+          if (fs.existsSync(pageFile)) {
+            routes.push(`${prefix}/${entry.name}`);
+          }
+          scanDir(subDir, `${prefix}/${entry.name}`);
+        } else if (entry.name === 'page.tsx' && prefix === '') {
+          routes.unshift('/'); // home page first
+        } else if (entry.name.endsWith('.page.tsx')) {
+          // Handle flat .page.tsx naming convention sometimes generated by LLM
+          const routeName = entry.name.replace('.page.tsx', '');
+          if (routeName === 'index') {
+            routes.unshift('/');
+          } else {
+            routes.push(`${prefix}/${routeName}`);
+          }
+        }
+      }
+    };
+
+    scanDir(pagesDir, '');
+    return [...new Set(routes)];
+  }
+
+  /**
+   * Build user flows driven by the project's instrumentation spans and actual page routes.
+   * Each frontend span becomes a distinct flow that navigates to the relevant page and
+   * interacts with the form/UI element that triggers that span.
+   */
+  private buildSpanDrivenFlows(project: EngagementSpec, pageRoutes: string[]): any[] {
+    const isBackendOnly = project.stack.type === 'backend-only';
+    const frontendSpans = project.instrumentation.spans.filter(s => s.layer === 'frontend');
+    const backendSpans = project.instrumentation.spans.filter(s => s.layer === 'backend');
+
+    const flows: any[] = [];
+
+    if (isBackendOnly) {
+      // For backend-only, generate one flow per backend span
+      for (const span of backendSpans.slice(0, 5)) {
+        const route = this.deriveRouteFromSpan(span.name, span.op, []);
+        flows.push({
+          name: this.humanizeName(span.name),
+          description: span.description || `Exercise ${span.name}`,
+          steps: [
+            { action: 'navigate', url: route, description: `Call ${route}` },
+            { action: 'wait', duration: 1000 }
+          ]
+        });
+      }
+      if (flows.length === 0) {
+        flows.push({ name: 'API Health Check', description: 'Check API', steps: [{ action: 'navigate', url: '/health' }, { action: 'wait', duration: 1000 }] });
+      }
+    } else if (frontendSpans.length > 0 || (!isBackendOnly && backendSpans.length > 0)) {
+      // One flow per span — use frontend spans when available, otherwise use backend spans
+      // (backend spans on a web project are triggered by frontend form actions)
+      const spansToUse = frontendSpans.length > 0 ? frontendSpans : backendSpans.slice(0, 5);
+      for (const span of spansToUse) {
+        const route = this.deriveRouteFromSpan(span.name, span.op, pageRoutes);
+        const steps: any[] = [
+          { action: 'navigate', url: route, description: `Navigate to ${route}` },
+          { action: 'wait', duration: 1500 }
+        ];
+
+        // Determine if this span is triggered by a form submission
+        const isFormAction = ['login', 'logout', 'register', 'signup', 'submit', 'validate',
+          'reset', 'create', 'update', 'delete', 'search', 'upload', 'checkout', 'pay',
+          'verify', 'confirm', 'auth'].some(kw =>
+          span.op.toLowerCase().includes(kw) || span.name.toLowerCase().includes(kw)
+        );
+
+        if (isFormAction) {
+          steps.push(...this.buildFormSteps(span));
+        } else {
+          steps.push({ action: 'scroll', description: 'Scroll page' });
+          steps.push({ action: 'wait', duration: 1500 });
+        }
+
+        flows.push({
+          name: this.humanizeName(span.name),
+          description: span.description || `Exercise ${span.name}`,
+          steps
+        });
+      }
+    } else if (pageRoutes.length > 0) {
+      // No frontend spans defined — generate a browse flow per page
+      for (const route of pageRoutes.slice(0, 5)) {
+        const label = route === '/' ? 'Home' : route.replace(/^\//, '').replace(/-/g, ' ');
+        flows.push({
+          name: `Browse ${label.charAt(0).toUpperCase() + label.slice(1)}`,
+          description: `User visits ${route}`,
+          steps: [
+            { action: 'navigate', url: route, description: `Go to ${route}` },
+            { action: 'wait', duration: 2500 },
+            { action: 'scroll', description: 'Scroll page' },
+            { action: 'wait', duration: 1500 }
+          ]
+        });
+      }
+    } else {
+      flows.push({
+        name: 'Homepage Visit',
+        description: 'User visits the homepage',
+        steps: [
+          { action: 'navigate', url: '/', description: 'Go to homepage' },
+          { action: 'wait', duration: 2500 },
+          { action: 'scroll' },
+          { action: 'wait', duration: 1500 }
+        ]
+      });
+    }
+
+    // Error scenario on the most relevant page
+    const errorPage = pageRoutes[0] || '/';
+    flows.push({
+      name: 'Error Scenario',
+      description: 'Triggers an error for Sentry error tracking',
+      steps: [
+        { action: 'navigate', url: errorPage, description: `Go to ${errorPage}` },
+        { action: 'wait', duration: 1000 },
+        { action: 'error', description: 'Inject JS error captured by Sentry' }
+      ]
+    });
+
+    return flows;
+  }
+
+  /**
+   * Derive a page route from a span's name and op, cross-referenced against known page routes.
+   */
+  private deriveRouteFromSpan(spanName: string, op: string, knownRoutes: string[]): string {
+    const keyword = op.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const nameParts = spanName.toLowerCase().split('.');
+
+    // Common keyword → route mappings.
+    // IMPORTANT: signup/register map to their own dedicated routes, NOT to '/'.
+    // Only map to '/' when there is genuinely no better route (e.g. generic home/dashboard).
+    const keywordRoutes: Record<string, string> = {
+      login: '/login', signin: '/login', auth: '/login',
+      logout: '/logout', signout: '/logout',
+      signup: '/signup', register: '/register', registration: '/register',
+      confirm: '/confirm', verify: '/confirm', verification: '/confirm',
+      reset: '/password-reset', forgot: '/forgot-password',
+      checkout: '/checkout', payment: '/checkout', pay: '/checkout',
+      cart: '/cart',
+      products: '/products', product: '/products', catalog: '/products',
+      search: '/search',
+      dashboard: '/dashboard', home: '/',
+      profile: '/profile', account: '/profile',
+      settings: '/settings',
+      upload: '/upload',
+      submit: '/submit', form: '/submit',
+    };
+
+    // Collect all words from the span name (split on . and _)
+    const allWords = spanName.toLowerCase().split(/[._]/).map(w => w.replace(/[^a-z0-9]/g, '')).filter(Boolean);
+
+    // 1. Try op keyword against known routes
+    if (keywordRoutes[keyword]) {
+      const candidate = keywordRoutes[keyword];
+      if (knownRoutes.length === 0 || knownRoutes.includes(candidate)) return candidate;
+    }
+
+    // 2. For each word in the span name (reversed = most specific first):
+    for (const word of [...allWords].reverse()) {
+      // a. Exact keyword → route mapping, validate against known routes
+      if (keywordRoutes[word]) {
+        const candidate = keywordRoutes[word];
+        if (knownRoutes.length === 0 || knownRoutes.includes(candidate)) return candidate;
+      }
+      // b. Known route whose path segment exactly matches this word
+      const exactMatch = knownRoutes.find(r => r.replace(/^\//, '').replace(/-/g, '') === word);
+      if (exactMatch) return exactMatch;
+    }
+
+    // 3. Partial match: a known route whose segment appears in the span name words
+    for (const route of knownRoutes) {
+      const seg = route.replace(/^\//, '').replace(/-/g, '').toLowerCase();
+      if (seg && seg !== '' && allWords.some(w => w.includes(seg) || seg.includes(w))) {
+        return route;
+      }
+    }
+
+    // 4. Prefer any non-root known route over '/' when nothing matched
+    const nonRoot = knownRoutes.find(r => r !== '/');
+    if (nonRoot) return nonRoot;
+
+    // Default to home
+    return '/';
+  }
+
+  /**
+   * Build form-filling steps based on the span's PII keys and attributes.
+   */
+  private buildFormSteps(span: { attributes: Record<string, string>; pii: { keys: string[] }; op: string; name: string }): any[] {
+    const steps: any[] = [];
+    const allKeys = [...Object.keys(span.attributes), ...span.pii.keys];
+    const seen = new Set<string>();
+
+    const addType = (selector: string, value: string) => {
+      if (!seen.has(selector)) {
+        seen.add(selector);
+        steps.push({ action: 'type', selector, value, description: `Fill ${selector}` });
+      }
+    };
+
+    for (const key of allKeys) {
+      const k = key.toLowerCase();
+      if (k.includes('email')) {
+        addType('input[type="email"], input[name="email"]', 'testuser@example.com');
+      } else if (k.includes('confirm') && k.includes('password')) {
+        addType('input[name="confirmPassword"], input[name="confirm_password"], input[placeholder*="onfirm"]', 'TestPassword123!');
+      } else if (k.includes('password')) {
+        addType('input[type="password"]', 'TestPassword123!');
+      } else if (k.includes('username') || k === 'user') {
+        addType('input[name="username"], input[placeholder*="sername"]', 'testuser');
+      } else if (k.includes('name') && !k.includes('user')) {
+        addType('input[name="name"], input[placeholder*="ame"]', 'Test User');
+      } else if (k.includes('phone')) {
+        addType('input[type="tel"], input[name="phone"]', '555-0100');
+      } else if (k.includes('amount') || k.includes('price') || k.includes('value')) {
+        addType('input[name="amount"], input[type="number"]', '100');
+      } else if (k.includes('search') || k.includes('query')) {
+        addType('input[type="search"], input[name="q"]', 'test query');
+      }
+    }
+
+    // Submit the form
+    steps.push({
+      action: 'submit',
+      selector: 'button[type="submit"], form button:last-of-type',
+      description: 'Submit form'
+    });
+    steps.push({ action: 'wait', duration: 2000 });
+    return steps;
+  }
+
+  /** Convert dot-notation span name to a human-readable flow name. */
+  private humanizeName(spanName: string): string {
+    return spanName.split('.').map(p =>
+      p.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+    ).join(' ');
   }
 
   private buildImplementationGuide(project: EngagementSpec): string {
@@ -1602,12 +2485,63 @@ Edit .env to customize:
 
   private buildDashboard(project: EngagementSpec): any {
     const widgets: any[] = [];
-    let x = 0, y = 0;
 
-    // Transaction volume widget
+    // ── Row 0: KPI big-numbers (y=0, h=1) ──────────────────────────────────
+    widgets.push({
+      title: 'Total Transactions',
+      description: 'Total transaction count',
+      displayType: 'big_number',
+      widgetType: 'spans',
+      interval: '1h',
+      queries: [{
+        aggregates: ['count(span.duration)'],
+        columns: [],
+        conditions: 'is_transaction:1',
+        name: '',
+        orderby: '',
+        fields: ['count(span.duration)']
+      }],
+      layout: { x: 0, y: 0, w: 2, h: 1, minH: 1 }
+    });
+
+    widgets.push({
+      title: 'P95 Latency',
+      description: 'P95 transaction response time',
+      displayType: 'big_number',
+      widgetType: 'spans',
+      interval: '1h',
+      queries: [{
+        aggregates: ['p95(span.duration)'],
+        columns: [],
+        conditions: 'is_transaction:1',
+        name: '',
+        orderby: '',
+        fields: ['p95(span.duration)']
+      }],
+      layout: { x: 2, y: 0, w: 2, h: 1, minH: 1 }
+    });
+
+    widgets.push({
+      title: 'Error Count',
+      description: 'Total errors captured',
+      displayType: 'big_number',
+      widgetType: 'error-events',
+      interval: '1h',
+      queries: [{
+        aggregates: ['count()'],
+        columns: [],
+        conditions: '',
+        name: '',
+        orderby: '',
+        fields: ['count()']
+      }],
+      layout: { x: 4, y: 0, w: 2, h: 1, minH: 1 }
+    });
+
+    // ── Row 1-2: Transaction volume + error rate (y=1, h=2) ─────────────────
     widgets.push({
       title: 'Transaction Volume',
-      description: 'Count of all transactions',
+      description: 'Transaction count over time',
       displayType: 'area',
       widgetType: 'spans',
       interval: '1h',
@@ -1619,49 +2553,9 @@ Edit .env to customize:
         orderby: '-count(span.duration)',
         fields: ['transaction', 'count(span.duration)']
       }],
-      layout: { x: 0, y: 0, w: 2, h: 2, minH: 2 }
+      layout: { x: 0, y: 1, w: 4, h: 2, minH: 2 }
     });
 
-    // P95 latency
-    widgets.push({
-      title: 'P95 Latency',
-      description: 'P95 transaction duration',
-      displayType: 'line',
-      widgetType: 'spans',
-      interval: '1h',
-      queries: [{
-        aggregates: ['p95(span.duration)'],
-        columns: ['transaction'],
-        conditions: 'is_transaction:1',
-        name: '',
-        orderby: '-p95(span.duration)',
-        fields: ['transaction', 'p95(span.duration)']
-      }],
-      layout: { x: 2, y: 0, w: 2, h: 2, minH: 2 }
-    });
-
-    // Custom spans widget for each operation
-    const ops = [...new Set(project.instrumentation.spans.map(s => s.op))];
-    ops.forEach((op, idx) => {
-      widgets.push({
-        title: `Span Op: ${op}`,
-        description: `Custom spans with op=${op}`,
-        displayType: 'area',
-        widgetType: 'spans',
-        interval: '1h',
-        queries: [{
-          aggregates: ['count(span.duration)'],
-          columns: ['span.description'],
-          conditions: `span.op:${op}`,
-          name: '',
-          orderby: '-count(span.duration)',
-          fields: ['span.description', 'count(span.duration)']
-        }],
-        layout: { x: (idx % 3) * 2, y: 2 + Math.floor(idx / 3) * 2, w: 2, h: 2, minH: 2 }
-      });
-    });
-
-    // Error rate
     widgets.push({
       title: 'Error Rate',
       description: 'Errors over time',
@@ -1676,11 +2570,73 @@ Edit .env to customize:
         orderby: '-count()',
         fields: ['issue', 'title', 'count()']
       }],
-      layout: { x: 4, y: 0, w: 2, h: 2, minH: 2 }
+      layout: { x: 4, y: 1, w: 2, h: 2, minH: 2 }
+    });
+
+    // ── Rows 3+: Per-op count + per-op P95 latency pairs ────────────────────
+    // Deduplicate ops and generate two widgets per op: count (area) + P95 (line)
+    const ops = [...new Set(project.instrumentation.spans.map(s => s.op))];
+    ops.forEach((op, idx) => {
+      const row = 3 + Math.floor(idx / 2) * 2;
+      const col = (idx % 2) * 3;
+
+      widgets.push({
+        title: `${op} — Throughput`,
+        description: `Span count for op:${op}`,
+        displayType: 'area',
+        widgetType: 'spans',
+        interval: '1h',
+        queries: [{
+          aggregates: ['count(span.duration)'],
+          columns: ['span.description'],
+          conditions: `span.op:${op}`,
+          name: '',
+          orderby: '-count(span.duration)',
+          fields: ['span.description', 'count(span.duration)']
+        }],
+        layout: { x: col, y: row, w: 3, h: 2, minH: 2 }
+      });
+
+      widgets.push({
+        title: `${op} — P95 Latency`,
+        description: `P95 duration for op:${op}`,
+        displayType: 'line',
+        widgetType: 'spans',
+        interval: '1h',
+        queries: [{
+          aggregates: ['p95(span.duration)'],
+          columns: ['span.description'],
+          conditions: `span.op:${op}`,
+          name: '',
+          orderby: '-p95(span.duration)',
+          fields: ['span.description', 'p95(span.duration)']
+        }],
+        layout: { x: col, y: row + 0, w: 3, h: 2, minH: 2 }
+      });
+    });
+
+    // ── Bottom row: Top slowest spans table ─────────────────────────────────
+    const lastRow = 3 + Math.ceil(ops.length / 2) * 2;
+    widgets.push({
+      title: 'Top Slowest Spans',
+      description: 'Ranked by P95 duration — useful for finding bottlenecks',
+      displayType: 'table',
+      widgetType: 'spans',
+      interval: '1h',
+      limit: 10,
+      queries: [{
+        aggregates: ['p95(span.duration)', 'count(span.duration)'],
+        columns: ['span.description', 'span.op'],
+        conditions: '',
+        name: '',
+        orderby: '-p95(span.duration)',
+        fields: ['span.description', 'span.op', 'p95(span.duration)', 'count(span.duration)']
+      }],
+      layout: { x: 0, y: lastRow, w: 6, h: 3, minH: 3 }
     });
 
     return {
-      title: `${project.project.name} - Monitoring Dashboard`,
+      title: `${project.project.name} — Monitoring Dashboard`,
       filters: {},
       projects: [],
       environment: [],

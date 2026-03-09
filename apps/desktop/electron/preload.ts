@@ -15,6 +15,7 @@ export interface IElectronAPI {
   // Chat
   sendChatMessage: (projectId: string, message: string) => Promise<any>;
   generatePlan: (projectId: string) => Promise<any>;
+  suggestCustomSpans: (projectId: string) => Promise<{ message: string; spans: any[] }>;
 
   // Generation
   generateApp: (projectId: string) => Promise<{ success: boolean; outputPath?: string; error?: string }>;
@@ -40,6 +41,8 @@ export interface IElectronAPI {
 
   // Data generation
   runDataGenerator: (projectId: string, config: any) => Promise<{ success: boolean; error?: string }>;
+  runLiveDataGenerator: (projectId: string, config: any) => Promise<{ success: boolean; error?: string }>;
+  stopLiveDataGenerator: () => Promise<void>;
   onDataOutput: (callback: (output: string) => void) => () => void;
   onDataError: (callback: (error: string) => void) => () => void;
 
@@ -93,6 +96,7 @@ const electronAPI: IElectronAPI = {
   // Chat
   sendChatMessage: (projectId, message) => ipcRenderer.invoke('chat:send', projectId, message),
   generatePlan: (projectId) => ipcRenderer.invoke('chat:generate-plan', projectId),
+  suggestCustomSpans: (projectId) => ipcRenderer.invoke('chat:suggest-custom-spans', projectId),
 
   // Generation
   generateApp: (projectId) => ipcRenderer.invoke('generate:app', projectId),
@@ -118,6 +122,8 @@ const electronAPI: IElectronAPI = {
 
   // Data generation
   runDataGenerator: (projectId, config) => ipcRenderer.invoke('data:run', projectId, config),
+  runLiveDataGenerator: (projectId, config) => ipcRenderer.invoke('data:run-live', projectId, config),
+  stopLiveDataGenerator: () => ipcRenderer.invoke('data:stop-live'),
   onDataOutput: (callback) => {
     const listener = (_event: any, output: string) => callback(output);
     ipcRenderer.on('data:output', listener);
