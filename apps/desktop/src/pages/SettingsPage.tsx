@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import * as Sentry from '@sentry/react';
-import { Bot, Github, Telescope, FlaskConical, CheckCircle2, ChevronDown, ChevronRight, ExternalLink, LogOut, RefreshCw } from 'lucide-react';
+import { Bot, Github, Telescope, FlaskConical, CheckCircle2, ChevronDown, ChevronRight, LogOut, RefreshCw } from 'lucide-react';
 import Button from '../components/Button';
 import { Input } from '../components/Input';
 import { toast } from '../store/toast-store';
@@ -10,7 +10,6 @@ export default function SettingsPage() {
     llm: { baseUrl: '', apiKey: '', model: 'gpt-4-turbo-preview' },
     github: { accessToken: '', username: '' },
     sentry: { authToken: '', organization: '', project: '' },
-    sentryOAuth: { clientId: '', clientSecret: '' },
   });
   const [loading, setLoading] = useState(true);
   const [sentryAuth, setSentryAuth] = useState<{
@@ -20,7 +19,6 @@ export default function SettingsPage() {
   }>({ authenticated: false });
   const [oauthConnecting, setOauthConnecting] = useState(false);
   const [showManualToken, setShowManualToken] = useState(false);
-  const [showOAuthSetup, setShowOAuthSetup] = useState(false);
 
   useEffect(() => {
     loadSettings();
@@ -50,8 +48,6 @@ export default function SettingsPage() {
   const handleSentryConnect = async () => {
     setOauthConnecting(true);
     try {
-      // Save OAuth credentials first so the service can read them
-      await window.electronAPI.updateSettings(settings);
       const result = await window.electronAPI.startSentryOAuth();
       if (result.success) {
         toast.success('Connected to Sentry!');
@@ -59,10 +55,6 @@ export default function SettingsPage() {
         await loadSettings();
       } else {
         toast.error(result.error || 'OAuth failed');
-        // Show setup panel if credentials are missing
-        if (result.error?.includes('credentials not configured')) {
-          setShowOAuthSetup(true);
-        }
       }
     } catch (err) {
       toast.error('Connection error: ' + err);
@@ -218,43 +210,6 @@ export default function SettingsPage() {
               >
                 {oauthConnecting ? 'Opening browser…' : 'Connect with Sentry'}
               </Button>
-
-              {/* OAuth App Setup */}
-              <div className="border border-sentry-border rounded-lg overflow-hidden">
-                <button
-                  className="w-full flex items-center justify-between px-4 py-3 text-sm text-white/70 hover:text-white hover:bg-white/5 transition-colors"
-                  onClick={() => setShowOAuthSetup(v => !v)}
-                >
-                  <span>OAuth App Setup</span>
-                  {showOAuthSetup ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                </button>
-                {showOAuthSetup && (
-                  <div className="px-4 pb-4 space-y-3 border-t border-sentry-border">
-                    <div className="mt-3 p-3 rounded-lg bg-sentry-purple-500/10 border border-sentry-purple-500/20 text-xs text-white/60 space-y-1">
-                      <p className="text-white/80 font-medium">One-time setup required:</p>
-                      <p>1. Go to <a href="https://sentry.io/settings/account/developer-settings/new-public/" target="_blank" rel="noopener noreferrer" className="text-sentry-purple-400 hover:underline inline-flex items-center gap-0.5">Sentry Developer Settings <ExternalLink size={10} /></a></p>
-                      <p>2. Create a <strong>Public Integration</strong> named "SE Copilot"</p>
-                      <p>3. Under Redirect URIs add: <code className="bg-white/10 px-1 rounded">http://localhost:54321/callback</code></p>
-                      <p>4. Enable scopes: <code className="bg-white/10 px-1 rounded">org:read</code> <code className="bg-white/10 px-1 rounded">org:write</code> <code className="bg-white/10 px-1 rounded">project:read</code></p>
-                      <p>5. Copy Client ID and Client Secret below</p>
-                    </div>
-                    <Input
-                      label="Client ID"
-                      placeholder="Your Sentry App client ID"
-                      value={settings.sentryOAuth?.clientId || ''}
-                      onChange={e => setSettings({ ...settings, sentryOAuth: { ...settings.sentryOAuth, clientId: e.target.value } })}
-                    />
-                    <Input
-                      label="Client Secret"
-                      type="password"
-                      placeholder="Your Sentry App client secret"
-                      value={settings.sentryOAuth?.clientSecret || ''}
-                      onChange={e => setSettings({ ...settings, sentryOAuth: { ...settings.sentryOAuth, clientSecret: e.target.value } })}
-                    />
-                    <Button size="sm" variant="secondary" onClick={handleSave}>Save Credentials</Button>
-                  </div>
-                )}
-              </div>
 
               {/* Manual token fallback */}
               <div className="border border-sentry-border rounded-lg overflow-hidden">

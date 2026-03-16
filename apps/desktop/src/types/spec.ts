@@ -135,10 +135,6 @@ export const SettingsSchema = z.object({
       name: z.string()
     })).default([])
   }).default({}),
-  sentryOAuth: z.object({
-    clientId: z.string().optional(),
-    clientSecret: z.string().optional()
-  }).default({})
 });
 
 export type Settings = z.infer<typeof SettingsSchema>;

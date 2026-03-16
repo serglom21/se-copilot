@@ -14,14 +14,13 @@ export class SentryAuthService {
   }
 
   async startOAuthFlow(): Promise<{ success: boolean; error?: string }> {
-    const settings = this.storage.getSettings() as any;
-    const clientId = settings.sentryOAuth?.clientId?.trim();
-    const clientSecret = settings.sentryOAuth?.clientSecret?.trim();
+    const clientId = process.env.SENTRY_CLIENT_ID?.trim();
+    const clientSecret = process.env.SENTRY_CLIENT_SECRET?.trim();
 
     if (!clientId || !clientSecret) {
       return {
         success: false,
-        error: 'Sentry OAuth credentials not configured. Add your Client ID and Client Secret in Settings → Sentry Connection.'
+        error: 'Sentry OAuth credentials not found. Ensure SENTRY_CLIENT_ID and SENTRY_CLIENT_SECRET are set in the .env file.'
       };
     }
 
