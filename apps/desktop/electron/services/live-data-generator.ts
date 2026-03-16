@@ -4,6 +4,8 @@ import path from 'path';
 import puppeteer, { Browser, Page } from 'puppeteer';
 import { StorageService } from './storage';
 import { EngagementSpec } from '../../src/types/spec';
+import { LLMService } from './llm';
+import { SentryAPIService } from './sentry-api';
 
 export interface LiveDataGenConfig {
   frontendDsn: string;
@@ -20,12 +22,14 @@ export interface UserFlow {
 }
 
 export interface FlowStep {
-  action: 'navigate' | 'click' | 'type' | 'wait' | 'scroll' | 'select' | 'submit' | 'error';
+  action: 'navigate' | 'click' | 'type' | 'wait' | 'scroll' | 'select' | 'submit' | 'error' | 'api_call';
   selector?: string;
   value?: string;
   url?: string;
   duration?: number;
   description?: string;
+  method?: string;
+  body?: Record<string, any>;
 }
 
 export class LiveDataGeneratorService {
@@ -34,13 +38,18 @@ export class LiveDataGeneratorService {
   private frontendProcess: ChildProcess | null = null;
   private browser: Browser | null = null;
   private isRunning: boolean = false;
+  private llmService: LLMService | null = null;
+  private sentryService: SentryAPIService | null = null;
+  private _runStartTime: number = 0;
 
   // Default ports
   private readonly BACKEND_PORT = 3001;
   private readonly FRONTEND_PORT = 3000;
 
-  constructor(storage: StorageService) {
+  constructor(storage: StorageService, llmService?: LLMService, sentryService?: SentryAPIService) {
     this.storage = storage;
+    this.llmService = llmService || null;
+    this.sentryService = sentryService || null;
   }
 
   async runLiveDataGenerator(
@@ -68,14 +77,27 @@ export class LiveDataGeneratorService {
       // Load user flows
       const flowsPath = path.join(outputPath, 'user-flows.json');
       let userFlows: UserFlow[];
-      
+
+      // Always regenerate flows — never use stale cache
       if (fs.existsSync(flowsPath)) {
-        userFlows = JSON.parse(fs.readFileSync(flowsPath, 'utf-8'));
-      } else {
-        // Generate default flows based on project type
-        userFlows = this.generateDefaultFlows(project);
-        fs.writeFileSync(flowsPath, JSON.stringify(userFlows, null, 2));
+        fs.unlinkSync(flowsPath);
       }
+
+      // Try LLM-based intelligent generation, fall back to heuristics
+      this._runStartTime = Math.floor(Date.now() / 1000);
+      if (this.llmService) {
+        try {
+          onOutput('🤖 Generating intelligent user flows...\n');
+          userFlows = await this.generateIntelligentFlows(project, appPath, onOutput);
+          onOutput(`   ✓ Generated ${userFlows.length} intelligent flows\n\n`);
+        } catch (err) {
+          onOutput(`   ⚠️ LLM flow generation failed, using heuristics: ${err}\n\n`);
+          userFlows = this.generateDefaultFlows(project);
+        }
+      } else {
+        userFlows = this.generateDefaultFlows(project);
+      }
+      fs.writeFileSync(flowsPath, JSON.stringify(userFlows, null, 2));
 
       onOutput('🚀 Starting Live Data Generator\n');
       onOutput('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n');
@@ -143,6 +165,12 @@ export class LiveDataGeneratorService {
       onOutput('   • Real SDK automatic instrumentation\n');
       onOutput('   • Web Vitals and performance metrics\n');
       onOutput('   • Custom spans with attributes\n');
+
+      // Step 8: Verify coverage and retry missing spans
+      onOutput('\n🔍 Step 8: Verifying span coverage in Sentry...\n');
+      onOutput('   ⏳ Waiting 15s for Sentry ingestion...\n');
+      await this.delay(15000);
+      await this.verifyAndRetry(project, config, onOutput);
 
       return { success: true };
 
@@ -477,6 +505,32 @@ PORT=${this.BACKEND_PORT}
       case 'error':
         await this.injectError(page, project);
         break;
+
+      case 'api_call': {
+        if (step.url) {
+          const fullUrl = step.url.startsWith('http')
+            ? step.url
+            : `http://localhost:${this.BACKEND_PORT}${step.url}`;
+          try {
+            await page.evaluate(
+              async (params: { url: string; method: string; body: any }) => {
+                const opts: RequestInit = {
+                  method: params.method,
+                  headers: { 'Content-Type': 'application/json' },
+                };
+                if (params.method !== 'GET') {
+                  opts.body = JSON.stringify(params.body || {});
+                }
+                await fetch(params.url, opts).then(r => r.json()).catch(() => null);
+              },
+              { url: fullUrl, method: step.method || 'POST', body: step.body || {} }
+            );
+          } catch {
+            // api_call failures are non-fatal — the navigate already generated a trace
+          }
+        }
+        break;
+      }
     }
 
     // Small delay between steps
@@ -594,6 +648,234 @@ PORT=${this.BACKEND_PORT}
   }
 
   /**
+   * Generate user flows using LLM with code-grounded prompting and reflection loop.
+   */
+  private async generateIntelligentFlows(
+    project: EngagementSpec,
+    appPath: string,
+    onOutput: (data: string) => void
+  ): Promise<UserFlow[]> {
+    // Read actual backend routes code for code-grounded prompting
+    const backendRoutesCode = this.readBackendRoutesCode(appPath, project);
+
+    // Scan actual frontend pages
+    const frontendPages = this.scanGeneratedPageRoutes(appPath, project);
+
+    // Extract widget filter conditions for attribute seeding
+    const widgetFilters = this.extractWidgetFilters(project);
+
+    // Generate run ID for post-run verification
+    const runId = `${project.id.substring(0, 8)}-${Date.now()}`;
+
+    // Delegate to LLM service
+    const flows = await this.llmService!.generateUserFlows(
+      project,
+      backendRoutesCode,
+      frontendPages,
+      widgetFilters,
+      runId
+    );
+
+    // Persist run ID so verifyAndRetry can filter by it
+    (this as any)._currentRunId = runId;
+    (this as any)._runIdTimestamp = this._runStartTime;
+
+    // Always append an error flow
+    const errorPage = frontendPages[0] || '/';
+    flows.push({
+      name: 'Error Scenario',
+      description: 'Triggers a JS error captured by Sentry',
+      steps: [
+        { action: 'navigate', url: errorPage },
+        { action: 'wait', duration: 1000 },
+        { action: 'error' }
+      ]
+    });
+
+    return flows;
+  }
+
+  /**
+   * After flows run, query Sentry to check which spec spans appeared.
+   * For any missing spans, run targeted api_call flows and retry.
+   */
+  private async verifyAndRetry(
+    project: EngagementSpec,
+    config: LiveDataGenConfig,
+    onOutput: (data: string) => void
+  ): Promise<void> {
+    if (!this.sentryService) {
+      onOutput('   ℹ️ Sentry service not available, skipping verification\n');
+      return;
+    }
+
+    const specSpanNames = project.instrumentation.spans.map(s => s.name);
+    if (specSpanNames.length === 0) return;
+
+    try {
+      const { found, missing } = await this.sentryService.querySpansByName(
+        specSpanNames,
+        this._runStartTime
+      );
+
+      if (found.length > 0) {
+        onOutput(`   ✓ Verified: ${found.join(', ')}\n`);
+      }
+
+      if (missing.length === 0) {
+        onOutput('   ✅ All spec spans verified in Sentry!\n');
+        return;
+      }
+
+      onOutput(`   ⚠️ Missing spans: ${missing.join(', ')}\n`);
+      onOutput('   🔄 Running targeted retry flows...\n');
+
+      // Build targeted api_call flows for each missing span
+      const missingSpans = project.instrumentation.spans.filter(s => missing.includes(s.name));
+      const retryFlows = this.buildTargetedRetryFlows(missingSpans, config);
+
+      if (retryFlows.length > 0 && this.browser) {
+        for (const flow of retryFlows) {
+          onOutput(`   → Retrying: ${flow.name}\n`);
+          try {
+            await this.executeFlow(flow, false, project, onOutput);
+          } catch (err) {
+            onOutput(`   ⚠️ Retry failed: ${err}\n`);
+          }
+          await this.delay(500);
+        }
+
+        onOutput('   ⏳ Waiting 10s for retry ingestion...\n');
+        await this.delay(10000);
+
+        // Second verification pass
+        const { found: found2, missing: missing2 } = await this.sentryService.querySpansByName(
+          missing,
+          this._runStartTime
+        );
+        if (found2.length > 0) onOutput(`   ✓ Retry recovered: ${found2.join(', ')}\n`);
+        if (missing2.length > 0) {
+          onOutput(`   ⚠️ Still missing after retry: ${missing2.join(', ')}\n`);
+          onOutput('   💡 Check that DSNs are set and SDK is initialized before route handlers\n');
+        }
+      }
+    } catch (err) {
+      onOutput(`   ⚠️ Verification error (non-fatal): ${err}\n`);
+    }
+  }
+
+  /**
+   * Build simple api_call flows for missing spans based on the engagement spec.
+   */
+  private buildTargetedRetryFlows(
+    spans: any[],
+    config: LiveDataGenConfig
+  ): UserFlow[] {
+    const READ_KEYWORDS = ['fetch', 'load', 'get', 'list', 'read', 'query', 'search', 'filter', 'view', 'show', 'detail'];
+    const spanMethod = (name: string) =>
+      READ_KEYWORDS.some(k => name.toLowerCase().includes(k)) ? 'GET' : 'POST';
+
+    const deriveRoute = (spanName: string): string => {
+      const parts = spanName.split('.');
+      if (parts.length === 1) return `/${parts[0].replace(/_/g, '-')}`;
+      const ns = parts[0];
+      const action = parts.slice(1).join('/').replace(/_/g, '-');
+      return `/${ns}/${action}`;
+    };
+
+    return spans.map(span => {
+      const method = spanMethod(span.name);
+      const endpoint = `/api${deriveRoute(span.name)}`;
+      const body: Record<string, any> = { se_copilot_run_id: (this as any)._currentRunId || 'retry' };
+
+      // Seed body with realistic attribute values
+      for (const key of Object.keys(span.attributes)) {
+        const k = key.toLowerCase();
+        if (k.includes('id')) body[key] = `test-${k}-001`;
+        else if (k.includes('email')) body[key] = 'test@example.com';
+        else if (k.includes('amount') || k.includes('price')) body[key] = 99.99;
+        else if (k.includes('count') || k.includes('quantity')) body[key] = 3;
+        else body[key] = 'test-value';
+      }
+
+      return {
+        name: `Retry: ${this.humanizeName(span.name)}`,
+        description: `Targeted retry for ${span.name}`,
+        steps: [
+          { action: 'navigate' as const, url: '/' },
+          { action: 'wait' as const, duration: 500 },
+          {
+            action: 'api_call' as const,
+            url: `http://localhost:${this.BACKEND_PORT}${endpoint}`,
+            method,
+            body,
+            description: `Call ${method} ${endpoint}`
+          },
+          { action: 'wait' as const, duration: 1000 }
+        ]
+      };
+    });
+  }
+
+  /**
+   * Read the actual backend routes file content for code-grounded LLM prompting.
+   */
+  private readBackendRoutesCode(appPath: string, project: EngagementSpec): string {
+    const isPython = project.stack.backend === 'flask' || project.stack.backend === 'fastapi';
+
+    const candidates = isPython
+      ? [
+          path.join(appPath, 'main.py'),
+          path.join(appPath, 'app.py'),
+          path.join(appPath, 'routes.py'),
+        ]
+      : [
+          path.join(appPath, 'backend', 'src', 'routes', 'api.ts'),
+          path.join(appPath, 'backend', 'src', 'routes', 'index.ts'),
+          path.join(appPath, 'backend', 'src', 'index.ts'),
+          path.join(appPath, 'backend', 'routes', 'api.js'),
+          path.join(appPath, 'backend', 'index.js'),
+        ];
+
+    for (const candidate of candidates) {
+      if (fs.existsSync(candidate)) {
+        try {
+          return fs.readFileSync(candidate, 'utf-8');
+        } catch {
+          // try next
+        }
+      }
+    }
+
+    return '// routes file not found';
+  }
+
+  /**
+   * Extract dashboard widget filter conditions to seed api_call bodies with
+   * attribute values that match the widget queries.
+   */
+  private extractWidgetFilters(project: EngagementSpec): Array<{ spanName: string; conditions: string }> {
+    const filters: Array<{ spanName: string; conditions: string }> = [];
+    const widgets: any[] = (project as any).dashboard?.widgets || [];
+
+    for (const widget of widgets) {
+      const queries: any[] = widget.queries || [];
+      for (const query of queries) {
+        const conditions: string = query.conditions || '';
+        if (!conditions) continue;
+        for (const span of project.instrumentation.spans) {
+          if (conditions.includes(span.name) || conditions.includes(span.op)) {
+            filters.push({ spanName: span.name, conditions });
+            break;
+          }
+        }
+      }
+    }
+
+    return filters;
+  }
+
+  /**
    * Generate user flows derived from the project's instrumentation spans and
    * the actual page routes that were generated. Falls back to scanning the
    * filesystem if the flows file doesn't exist yet.
@@ -628,7 +910,7 @@ PORT=${this.BACKEND_PORT}
     } else if (frontendSpans.length > 0 || (!isBackendOnly && backendSpans.length > 0)) {
       // Use frontend spans when available; fall back to backend spans for web projects
       // (backend spans on a web project are triggered by frontend form actions)
-      const spansToUse = frontendSpans.length > 0 ? frontendSpans : backendSpans.slice(0, 5);
+      const spansToUse = project.instrumentation.spans.slice(0, 8);
       for (const span of spansToUse) {
         const route = this.deriveRouteFromSpan(span.name, span.op, pageRoutes);
         const steps: FlowStep[] = [

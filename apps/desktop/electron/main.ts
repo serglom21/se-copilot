@@ -73,10 +73,10 @@ app.whenReady().then(async () => {
   generatorService = new GeneratorService(storage, llmService);
   githubService = new GitHubService(storage);
   dataRunnerService = new DataRunnerService(storage);
-  liveDataGeneratorService = new LiveDataGeneratorService(storage);
+  sentryAPIService = new SentryAPIService(storage);
+  liveDataGeneratorService = new LiveDataGeneratorService(storage, llmService, sentryAPIService);
   deploymentService = new DeploymentService(storage);
   expoDeployService = new ExpoDeployService(storage);
-  sentryAPIService = new SentryAPIService(storage);
   exportService = new ExportService(storage);
 
   setupIpcHandlers();

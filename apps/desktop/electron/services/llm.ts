@@ -2205,6 +2205,186 @@ area/line widget:
     return valid;
   }
 
+  /**
+   * Generate intelligent user flows for Puppeteer, with code-grounded prompting
+   * and a reflection loop to catch coverage gaps.
+   */
+  async generateUserFlows(
+    project: EngagementSpec,
+    backendRoutesCode: string,
+    frontendPages: string[],
+    widgetFilters: Array<{ spanName: string; conditions: string }>,
+    runId: string
+  ): Promise<any[]> {
+    const settings = this.storage.getSettings();
+    if (!settings.llm.apiKey || !settings.llm.baseUrl) {
+      throw new Error('LLM settings not configured');
+    }
+
+    const spans = project.instrumentation.spans;
+    const isBackendOnly = project.stack.type === 'backend-only';
+
+    // Derive HTTP method and endpoint for each span (must match generator.ts logic)
+    const READ_KEYWORDS = ['fetch', 'load', 'get', 'list', 'read', 'query', 'search', 'filter', 'view', 'show', 'detail'];
+    const spanMethod = (name: string) =>
+      READ_KEYWORDS.some(k => name.toLowerCase().includes(k)) ? 'GET' : 'POST';
+    const deriveRoute = (spanName: string): string => {
+      const parts = spanName.split('.');
+      if (parts.length === 1) return `/${parts[0].replace(/_/g, '-')}`;
+      return `/${parts[0]}/${parts.slice(1).join('/').replace(/_/g, '-')}`;
+    };
+
+    // Build span endpoint map with widget seed values
+    const spanEndpoints = spans.map(s => {
+      const method = spanMethod(s.name);
+      const endpoint = `/api${deriveRoute(s.name)}`;
+      const widgetConditions = widgetFilters.find(f => f.spanName === s.name)?.conditions || '';
+
+      // Parse attribute seed values from widget filter conditions
+      const seedValues: Record<string, string> = {};
+      if (widgetConditions) {
+        const matches = widgetConditions.matchAll(/([a-z_][a-z0-9_.]*):([^\s"]+)/gi);
+        for (const m of matches) {
+          if (!m[1].startsWith('span.') && m[1] !== 'is_transaction' && !m[1].startsWith('has')) {
+            seedValues[m[1]] = m[2];
+          }
+        }
+      }
+
+      return { ...s, method, endpoint, seedValues };
+    });
+
+    const frontendBase = `http://localhost:${isBackendOnly ? 3001 : 3000}`;
+    const apiBase = 'http://localhost:3001';
+
+    const spanDescriptions = spanEndpoints.map(se =>
+      `- ${se.name} (${se.layer}, op: ${se.op})
+  Description: ${se.description || 'no description'}
+  Endpoint: ${se.method} ${apiBase}${se.endpoint}
+  Body attributes: ${Object.keys(se.attributes).join(', ') || '(none)'}
+  Widget seed values: ${Object.keys(se.seedValues).length > 0 ? JSON.stringify(se.seedValues) : '(none)'}`
+    ).join('\n');
+
+    const prompt = `You are a Puppeteer automation expert generating user flows to trigger Sentry custom spans.
+
+PROJECT: ${project.project.name} (${project.project.vertical})
+STACK: ${project.stack.type}
+BASE URL: ${frontendBase}
+API BASE: ${apiBase}
+RUN ID: ${runId}
+
+ENGAGEMENT SPEC SPANS — you MUST trigger EVERY one:
+${spanDescriptions}
+
+FRONTEND PAGES (for navigate steps):
+${frontendPages.length > 0 ? frontendPages.join(', ') : '/'}
+
+BACKEND ROUTES (actual generated code — use EXACT paths from this):
+\`\`\`
+${backendRoutesCode.substring(0, 2500)}
+\`\`\`
+
+FLOW STEP TYPES:
+  navigate: { "action": "navigate", "url": "/path" }
+  api_call: { "action": "api_call", "url": "http://localhost:3001/api/...", "method": "GET"|"POST", "body": {...} }
+  click:    { "action": "click", "selector": "button[type=submit]" }
+  type:     { "action": "type", "selector": "input[name=email]", "value": "test@example.com" }
+  wait:     { "action": "wait", "duration": 1500 }
+  scroll:   { "action": "scroll" }
+
+RULES:
+1. Generate ONE flow per engagement spec span
+2. EVERY backend span MUST have an api_call step hitting its EXACT endpoint
+3. api_call bodies MUST include: "se_copilot_run_id": "${runId}"
+4. api_call bodies MUST include all span attribute keys with realistic test values
+5. Use widget seed values from the span description above when provided
+6. For frontend spans: navigate to the correct page + interaction steps (scroll, click, wait)
+7. Always start each flow with a navigate step (ensures browser context + Sentry is initialized)
+8. api_call fires fetch() from browser context — Sentry automatically adds distributed trace headers
+9. Use EXACT HTTP method and path from the backend routes code above — do not invent paths
+10. One span per flow (focused flows reduce overlap noise in Sentry)
+
+EXAMPLE flow (adapt names and paths to this project):
+{
+  "name": "Checkout Validate Cart",
+  "description": "Triggers checkout.validate_cart backend span",
+  "steps": [
+    { "action": "navigate", "url": "/" },
+    { "action": "wait", "duration": 500 },
+    { "action": "api_call", "url": "http://localhost:3001/api/checkout/validate-cart", "method": "POST", "body": { "cart_id": "test-cart-001", "user_id": "test-user-001", "se_copilot_run_id": "${runId}" } },
+    { "action": "wait", "duration": 1000 }
+  ]
+}
+
+Return ONLY a valid JSON array of flows. No markdown fences, no explanation.`;
+
+    // Round 1: generate all flows
+    const raw = await this.callLLM([{ role: 'user', content: prompt }], settings.llm);
+    let flows: any[];
+
+    try {
+      const jsonStr = this.extractJsonFromResponse(raw);
+      flows = JSON.parse(jsonStr);
+      if (!Array.isArray(flows)) throw new Error('Response is not a JSON array');
+    } catch (err) {
+      throw new Error(`LLM flow generation failed to parse: ${err}`);
+    }
+
+    // Round 2 (reflection): deterministic coverage check — which backend spans have no api_call?
+    const backendSpans = spans.filter(s => s.layer === 'backend');
+    const coveredEndpoints = new Set<string>();
+
+    for (const flow of flows) {
+      for (const step of (flow.steps || [])) {
+        if (step.action === 'api_call' && typeof step.url === 'string') {
+          // Normalize for comparison
+          coveredEndpoints.add(step.url.toLowerCase().replace(/-/g, '').replace(/\//g, ''));
+        }
+      }
+    }
+
+    const uncoveredBackendSpans = backendSpans.filter(s => {
+      const expectedEndpointNorm = `${apiBase}${spanEndpoints.find(se => se.name === s.name)?.endpoint || ''}`.toLowerCase().replace(/-/g, '').replace(/\//g, '');
+      return ![...coveredEndpoints].some(ep => ep.includes(expectedEndpointNorm.replace('http:', '').replace('localhost3001', '')));
+    });
+
+    if (uncoveredBackendSpans.length > 0) {
+      console.log(`[generateUserFlows] Reflection: ${uncoveredBackendSpans.length} backend spans uncovered, filling gaps`);
+
+      const gapDescriptions = uncoveredBackendSpans.map(s => {
+        const se = spanEndpoints.find(x => x.name === s.name)!;
+        return `- ${s.name}: ${se.method} ${apiBase}${se.endpoint} — body attrs: ${Object.keys(s.attributes).join(', ')}`;
+      }).join('\n');
+
+      const gapPrompt = `Generate Puppeteer user flows for ONLY these backend spans that were missed:
+
+${gapDescriptions}
+
+RULES:
+- Each api_call body MUST include "se_copilot_run_id": "${runId}"
+- Always start with a navigate step to "/"
+- Use EXACT method and path listed above
+- One flow per span
+
+Return ONLY a valid JSON array of flows. No markdown.`;
+
+      try {
+        const gapRaw = await this.callLLM([{ role: 'user', content: gapPrompt }], settings.llm);
+        const gapJsonStr = this.extractJsonFromResponse(gapRaw);
+        const gapFlows = JSON.parse(gapJsonStr);
+        if (Array.isArray(gapFlows)) {
+          flows.push(...gapFlows);
+          console.log(`[generateUserFlows] Added ${gapFlows.length} gap-filling flows`);
+        }
+      } catch (err) {
+        console.warn('[generateUserFlows] Gap fill failed (non-fatal):', err);
+      }
+    }
+
+    console.log(`✅ generateUserFlows: ${flows.length} total flows generated`);
+    return flows;
+  }
+
   private async callLLM(messages: ChatMessage[], config: { baseUrl?: string; apiKey?: string; model?: string }): Promise<string> {
     const { baseUrl, apiKey, model = 'gpt-4-turbo-preview' } = config;
 

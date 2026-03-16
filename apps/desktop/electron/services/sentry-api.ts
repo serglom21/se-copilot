@@ -372,6 +372,69 @@ export class SentryAPIService {
     }
   }
 
+  /**
+   * Query Sentry spansIndexed for each span name, checking if it appeared
+   * since the given Unix timestamp (seconds). Returns found/missing lists.
+   */
+  async querySpansByName(
+    spanNames: string[],
+    sinceTimestamp: number
+  ): Promise<{ found: string[]; missing: string[] }> {
+    const found: string[] = [];
+    const missing: string[] = [];
+
+    try {
+      const settings = this.storage.getSettings();
+      if (!settings.sentry.authToken || !settings.sentry.organization) {
+        return { found: [], missing: spanNames };
+      }
+
+      const org = settings.sentry.organization.trim();
+      const token = settings.sentry.authToken.trim();
+      const apiBase = getSentryApiBase(org);
+
+      for (const spanName of spanNames) {
+        try {
+          const url = `${apiBase}/organizations/${org}/events/?dataset=spansIndexed&field=span_id,description,start_timestamp&query=${encodeURIComponent(`span.description:${spanName}`)}&sort=-start_timestamp&limit=10`;
+
+          const response = await fetch(url, {
+            headers: {
+              'Authorization': `Bearer ${token}`,
+              'Content-Type': 'application/json'
+            }
+          });
+
+          if (!response.ok) {
+            missing.push(spanName);
+            continue;
+          }
+
+          const data = await response.json();
+          const spans: any[] = data.data || [];
+
+          // Check if any span was captured since our run started
+          const recentSpan = spans.find(s => {
+            const ts = parseFloat(String(s.start_timestamp || '0'));
+            return ts >= sinceTimestamp;
+          });
+
+          if (recentSpan) {
+            found.push(spanName);
+          } else {
+            missing.push(spanName);
+          }
+        } catch {
+          missing.push(spanName);
+        }
+      }
+    } catch (error) {
+      console.error('[querySpansByName] Error:', error);
+      return { found: [], missing: spanNames };
+    }
+
+    return { found, missing };
+  }
+
   async listDashboards(): Promise<{ success: boolean; dashboards?: any[]; error?: string }> {
     try {
       const settings = this.storage.getSettings();
