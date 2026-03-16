@@ -1,9 +1,8 @@
 import * as Sentry from '@sentry/electron/main';
 import { config as loadEnv } from 'dotenv';
-import { resolve } from 'path';
 
-// Load .env from the app root before anything else
-loadEnv({ path: resolve(__dirname, '../../.env') });
+// Load .env (looks in process.cwd() = apps/desktop during dev, app root when packaged)
+loadEnv();
 
 // Initialize Sentry at the very top
 
