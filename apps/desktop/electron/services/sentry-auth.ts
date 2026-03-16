@@ -4,8 +4,8 @@ import { shell } from 'electron';
 import { StorageService } from './storage';
 
 const OAUTH_PORT = 54321;
-const REDIRECT_URI = `http://localhost:${OAUTH_PORT}/callback`;
-const OAUTH_SCOPES = 'org:read org:write project:read';
+const PROXY_REDIRECT_URI = 'https://demo-workbench.sergio-lombana.workers.dev';
+const INTEGRATION_SLUG = 'demo-workbench';
 
 export class SentryAuthService {
   private storage: StorageService;
@@ -53,6 +53,7 @@ export class SentryAuthService {
         }
 
         const code = urlObj.searchParams.get('code');
+        const installationId = urlObj.searchParams.get('installationId');
         const oauthError = urlObj.searchParams.get('error');
 
         const closePage = (title: string, body: string) => {
@@ -64,7 +65,7 @@ export class SentryAuthService {
             <body><div class="card"><h2>${title}</h2><p>${body}</p></div></body></html>`);
         };
 
-        if (oauthError || !code) {
+        if (oauthError || !code || !installationId) {
           closePage('Authentication cancelled', 'You can close this tab and return to SE Copilot.');
           server.close();
           resolve({ success: false, error: oauthError || 'No authorization code received' });
@@ -72,18 +73,20 @@ export class SentryAuthService {
         }
 
         try {
-          // Exchange code for token
-          const tokenRes = await fetch('https://sentry.io/oauth/token/', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: new URLSearchParams({
-              grant_type: 'authorization_code',
-              code,
-              redirect_uri: REDIRECT_URI,
-              client_id: clientId,
-              client_secret: clientSecret,
-            }).toString()
-          });
+          // Exchange code for token using the installation-specific endpoint
+          const tokenRes = await fetch(
+            `https://sentry.io/api/0/sentry-app-installations/${installationId}/authorizations/`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                grant_type: 'authorization_code',
+                code,
+                client_id: clientId,
+                client_secret: clientSecret,
+              })
+            }
+          );
 
           if (!tokenRes.ok) {
             const errText = await tokenRes.text();
@@ -91,7 +94,7 @@ export class SentryAuthService {
           }
 
           const tokenData = await tokenRes.json();
-          const accessToken: string = tokenData.access_token;
+          const accessToken: string = tokenData.token;
 
           // Fetch authenticated user info
           let user = { name: 'Sentry User', email: '' };
@@ -105,14 +108,28 @@ export class SentryAuthService {
             }
           } catch { /* non-fatal */ }
 
-          // Fetch org list
-          const orgs = await this.fetchOrgs(accessToken);
+          // Get the org from the installation (more reliable than fetchOrgs,
+          // since the installation token only has access to the installed org)
+          let orgs: Array<{ slug: string; name: string }> = [];
+          try {
+            const installRes = await fetch(
+              `https://sentry.io/api/0/sentry-app-installations/${installationId}/`,
+              { headers: { 'Authorization': `Bearer ${accessToken}` } }
+            );
+            if (installRes.ok) {
+              const installData = await installRes.json();
+              const org = installData.organization;
+              if (org?.slug) orgs = [{ slug: org.slug, name: org.name }];
+            }
+          } catch { /* fall back */ }
+          if (orgs.length === 0) orgs = await this.fetchOrgs(accessToken);
 
           // Persist OAuth state
           this.storage.updateSettings({
             sentryAuth: {
               accessToken,
-              refreshToken: tokenData.refresh_token || '',
+              refreshToken: tokenData.refreshToken || '',
+              installationId,
               user,
               orgs
             }
@@ -147,7 +164,9 @@ export class SentryAuthService {
       });
 
       server.listen(OAUTH_PORT, () => {
-        const authUrl = `https://sentry.io/oauth/authorize/?response_type=code&client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&scope=${encodeURIComponent(OAUTH_SCOPES)}`;
+        // Sentry Public Integration install URL — no redirect_uri or scope params needed,
+        // Sentry uses the registered Redirect URL automatically
+        const authUrl = `https://sentry.io/sentry-apps/${INTEGRATION_SLUG}/external-install/`;
         shell.openExternal(authUrl);
       });
 

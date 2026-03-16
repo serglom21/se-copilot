@@ -1,45 +1,45 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
+import { CheckCircle2, ExternalLink, Upload, RefreshCw } from 'lucide-react';
 import { useProjectStore } from '../store/project-store';
 import Button from '../components/Button';
 import { Input } from '../components/Input';
+import { toast } from '../store/toast-store';
 
 export default function PublishPage() {
   const { projectId } = useParams<{ projectId: string }>();
   const { currentProject, loadProject } = useProjectStore();
-  
+  const navigate = useNavigate();
+
   const [githubStatus, setGithubStatus] = useState<{ authenticated: boolean; username?: string }>({
     authenticated: false
   });
-  
-  const [repoConfig, setRepoConfig] = useState({
-    name: '',
-    isPrivate: true
-  });
 
+  const [repoConfig, setRepoConfig] = useState({ name: '', isPrivate: true });
   const [publishing, setPublishing] = useState(false);
   const [publishResult, setPublishResult] = useState<{ success: boolean; repoUrl?: string; isUpdate?: boolean } | null>(null);
-  const [authInProgress, setAuthInProgress] = useState(false);
 
-  const [exporting, setExporting] = useState(false);
+  // Sentry dashboard push state
+  const [sentryAuth, setSentryAuth] = useState<{
+    authenticated: boolean;
+    user?: { name: string; email: string };
+    orgs?: Array<{ slug: string; name: string }>;
+  }>({ authenticated: false });
+  const [pushOrg, setPushOrg] = useState('');
   const [uploadingDashboard, setUploadingDashboard] = useState(false);
-  const [dashboardResult, setDashboardResult] = useState<{ success: boolean; dashboardUrl?: string; error?: string } | null>(null);
-  const [sentryConnected, setSentryConnected] = useState<boolean | null>(null);
+  const [dashboardUrl, setDashboardUrl] = useState('');
 
   useEffect(() => {
     if (projectId) {
       loadProject(projectId);
       checkGitHubStatus();
-      checkSentryConnection();
+      loadSentryAuth();
     }
   }, [projectId]);
 
-  // Refresh GitHub status when page becomes visible
   useEffect(() => {
-    const interval = setInterval(() => {
-      checkGitHubStatus();
-    }, 2000); // Check every 2 seconds
-
+    const interval = setInterval(checkGitHubStatus, 2000);
     return () => clearInterval(interval);
   }, []);
 
@@ -52,50 +52,27 @@ export default function PublishPage() {
     }
   }, [currentProject]);
 
-  const hasExistingRepo = currentProject?.project.githubRepoUrl && currentProject?.project.githubRepoName;
-
   const checkGitHubStatus = async () => {
     const status = await window.electronAPI.getGitHubStatus();
     setGithubStatus(status);
   };
 
-  const handleGitHubAuth = async () => {
-    setAuthInProgress(true);
-    try {
-      const { verification_uri } = await window.electronAPI.startGitHubAuth();
-      
-      // Open GitHub token creation page
-      window.open(verification_uri, '_blank');
-      
-      alert('Please create a Personal Access Token on GitHub with "repo" scope, then paste it in Settings.');
-      
-      // Poll for auth completion
-      // In a real implementation, this would poll the device flow endpoint
-      // For MVP, we just tell user to go to settings
-      setAuthInProgress(false);
-    } catch (error) {
-      alert('Error starting GitHub auth: ' + error);
-      setAuthInProgress(false);
+  const loadSentryAuth = async () => {
+    const status = await window.electronAPI.getSentryOAuthStatus();
+    setSentryAuth(status);
+    if (status.authenticated && status.orgs?.length) {
+      // Use org from settings if set, otherwise first org
+      const settings = await window.electronAPI.getSettings();
+      const savedOrg = settings?.sentry?.organization;
+      const firstOrg = status.orgs[0].slug;
+      setPushOrg(savedOrg && status.orgs.some((o: any) => o.slug === savedOrg) ? savedOrg : firstOrg);
     }
   };
 
+  const hasExistingRepo = currentProject?.project.githubRepoUrl && currentProject?.project.githubRepoName;
+
   const handlePublish = async () => {
-    if (!currentProject) return;
-
-    if (!repoConfig.name.trim()) {
-      alert('Please enter a repository name');
-      return;
-    }
-
-    const isUpdate = hasExistingRepo;
-    const confirmMessage = isUpdate
-      ? `Push changes to existing GitHub repository "${repoConfig.name}"?\n\nThis will commit and push your latest changes.`
-      : `Create GitHub repository "${repoConfig.name}" and push code?`;
-
-    if (!confirm(confirmMessage)) {
-      return;
-    }
-
+    if (!currentProject || !repoConfig.name.trim()) return;
     setPublishing(true);
     try {
       const result = await window.electronAPI.createAndPushRepo(
@@ -103,382 +80,248 @@ export default function PublishPage() {
         repoConfig.name,
         repoConfig.isPrivate
       );
-
       if (result.success) {
-        setPublishResult({
-          success: true,
-          repoUrl: result.repoUrl,
-          isUpdate: result.isUpdate
-        });
-
-        // Reload project to get updated GitHub URL
+        setPublishResult({ success: true, repoUrl: result.repoUrl, isUpdate: result.isUpdate });
         await loadProject(currentProject.id);
+        toast.success(result.isUpdate ? 'Changes pushed to GitHub' : 'Published to GitHub');
       } else {
-        throw new Error(result.error);
+        toast.error('GitHub publish failed: ' + result.error);
       }
     } catch (error) {
-      alert('Error publishing to GitHub: ' + error);
+      toast.error('Error: ' + error);
     } finally {
       setPublishing(false);
     }
   };
 
-  const checkSentryConnection = async () => {
-    try {
-      const result = await window.electronAPI.verifySentryConnection();
-      setSentryConnected(result.success);
-    } catch (error) {
-      setSentryConnected(false);
-    }
-  };
-
   const handleUploadDashboard = async () => {
     if (!currentProject) return;
-
-    if (!confirm('Upload dashboard to Sentry?\n\nThis will create a new dashboard in your Sentry organization with all the custom widgets for your instrumented spans.')) {
-      return;
-    }
-
     setUploadingDashboard(true);
-    setDashboardResult(null);
-
+    setDashboardUrl('');
     try {
+      const settings = await window.electronAPI.getSettings();
+      const credentials = sentryAuth.authenticated
+        ? { authToken: settings?.sentryAuth?.accessToken || settings?.sentry?.authToken, organization: pushOrg }
+        : undefined;
+
       const result = await window.electronAPI.createSentryDashboard(
         currentProject.id,
-        `${currentProject.project.name} - Performance Dashboard`
+        `${currentProject.project.name} — Performance Dashboard`,
+        credentials
       );
 
-      setDashboardResult(result);
-
-      if (result.success) {
-        // Success message will be shown in the UI
+      if (result.success && result.dashboardUrl) {
+        setDashboardUrl(result.dashboardUrl);
+        toast.success('Dashboard pushed to Sentry');
       } else {
-        alert(`Error uploading dashboard: ${result.error}`);
+        toast.error('Dashboard push failed: ' + result.error);
       }
     } catch (error) {
-      alert('Error uploading dashboard: ' + error);
-      setDashboardResult({ success: false, error: String(error) });
+      toast.error('Error: ' + error);
     } finally {
       setUploadingDashboard(false);
     }
   };
 
-  const handleExportDemoPackage = async () => {
-    if (!currentProject) return;
-
-    setExporting(true);
-
-    try {
-      const result = await window.electronAPI.exportDemoPackage(currentProject.id);
-
-      if (result.success) {
-        alert(`✅ Demo package exported successfully!\n\nLocation: ${result.outputPath}\n\nThis package includes:\n• GitHub repo link\n• Implementation guide\n• Dashboard configuration\n• Quick start instructions`);
-      } else {
-        throw new Error(result.error);
-      }
-    } catch (error) {
-      alert('Error exporting demo package: ' + error);
-    } finally {
-      setExporting(false);
-    }
-  };
-
-  if (!currentProject) {
-    return <div className="p-8 text-white">Loading...</div>;
-  }
+  if (!currentProject) return <div className="p-8 text-white/50 text-sm">Loading…</div>;
 
   return (
-    <div className="p-8 max-w-3xl mx-auto">
-      <div className="mb-8">
-        <div className="flex items-start justify-between">
-          <div className="flex-1">
-            <h1 className="text-4xl font-bold text-white mb-2">
-              {hasExistingRepo ? 'Push Updates to GitHub' : 'Publish to GitHub'}
-            </h1>
-            <p className="text-gray-400 text-lg">
-              {hasExistingRepo
-                ? 'Push your latest changes to the existing GitHub repository'
-                : 'Push your generated reference app to a new GitHub repository'}
-            </p>
-            {hasExistingRepo && currentProject?.project.githubRepoUrl && (
-              <button
-                onClick={(e) => {
-                  e.preventDefault();
-                  window.electronAPI.openInChrome(currentProject.project.githubRepoUrl!);
-                }}
-                className="text-sentry-purple-400 hover:text-sentry-purple-300 hover:underline text-sm mt-1 inline-block cursor-pointer bg-transparent border-none p-0"
-              >
-                Current repo: {currentProject.project.githubRepoName} →
-              </button>
-            )}
-          </div>
-          {hasExistingRepo && currentProject?.project.githubRepoUrl && (
-            <Button
-              size="sm"
-              variant="secondary"
-              onClick={() => window.electronAPI.openInChrome(currentProject.project.githubRepoUrl!)}
-            >
-              📂 View Repo
-            </Button>
-          )}
-        </div>
+    <div className="p-8 max-w-2xl mx-auto space-y-5">
+      <div>
+        <h1 className="text-2xl font-semibold text-white">
+          {hasExistingRepo ? 'Push Updates' : 'Publish'}
+        </h1>
+        <p className="text-sm text-white/45 mt-0.5">Share your reference app and dashboard</p>
       </div>
 
-      {/* Sentry Dashboard Upload */}
-      <div className="card p-6 mb-6">
-        <h2 className="text-2xl font-semibold text-white mb-4 flex items-center gap-2">
-          <span className="text-2xl">🔮</span> Upload Dashboard to Sentry
-        </h2>
+      {/* ── Sentry Dashboard ── */}
+      <div className="card p-5">
+        <div className="flex items-center gap-2 mb-4">
+          <span className="text-sentry-purple-400">
+            <Upload size={16} />
+          </span>
+          <h2 className="text-sm font-semibold text-white">Push Dashboard to Sentry</h2>
+        </div>
 
-        {sentryConnected === false ? (
-          <div className="bg-yellow-900/20 p-4 rounded-lg border border-yellow-700/50">
-            <div className="text-yellow-100 font-medium mb-2">
-              ⚠️ Sentry not configured
-            </div>
-            <p className="text-sm text-yellow-300 mb-4">
-              You need to configure your Sentry credentials to upload dashboards. Go to Settings to add your auth token and organization.
-            </p>
-            <div className="flex gap-2">
-              <Button onClick={() => window.location.href = '/#/settings'}>
-                Go to Settings
-              </Button>
-              <Button variant="secondary" onClick={checkSentryConnection}>
-                🔄 Refresh Status
-              </Button>
-            </div>
-          </div>
-        ) : sentryConnected === true ? (
-          <>
-            {dashboardResult?.success ? (
-              <div className="bg-green-900/20 rounded-lg border border-green-700/50 p-4 mb-4">
-                <div className="flex items-start gap-4">
-                  <div className="text-4xl">🎉</div>
-                  <div className="flex-1">
-                    <h3 className="text-xl font-semibold text-green-100 mb-2">
-                      Dashboard Uploaded Successfully!
-                    </h3>
-                    <p className="text-green-300 mb-4">
-                      Your custom dashboard with all instrumented spans has been created in Sentry.
-                    </p>
-                    {dashboardResult.dashboardUrl && (
-                      <Button
-                        onClick={() => window.electronAPI.openInChrome(dashboardResult.dashboardUrl!)}
-                      >
-                        View Dashboard in Sentry →
-                      </Button>
-                    )}
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                <div className="bg-green-900/20 p-4 rounded-lg border border-green-700/50">
-                  <div className="text-green-100 font-medium mb-2">
-                    ✓ Sentry Connected
-                  </div>
-                  <p className="text-sm text-green-300">
-                    Ready to upload your custom dashboard with all instrumented spans and performance widgets.
-                  </p>
-                </div>
-
-                <div className="bg-blue-900/20 p-4 rounded-lg text-sm text-blue-300 border border-blue-700/50">
-                  <strong className="text-blue-100">What will be uploaded:</strong>
-                  <ul className="list-disc list-inside mt-2 space-y-1">
-                    <li>Custom widgets for each instrumented span</li>
-                    <li>Performance metrics and trends</li>
-                    <li>Transaction throughput visualizations</li>
-                    <li>Error rate tracking</li>
-                  </ul>
-                </div>
-
-                <Button
-                  size="lg"
-                  onClick={handleUploadDashboard}
-                  disabled={uploadingDashboard}
-                  fullWidth
+        {sentryAuth.authenticated ? (
+          <div className="space-y-3">
+            {/* Org selector */}
+            {(sentryAuth.orgs?.length ?? 0) > 1 && (
+              <div>
+                <label className="block text-xs font-medium text-white/55 mb-1.5">Organization</label>
+                <select
+                  className="w-full bg-sentry-surface border border-sentry-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-sentry-purple-500"
+                  value={pushOrg}
+                  onChange={e => setPushOrg(e.target.value)}
                 >
-                  {uploadingDashboard ? '⏳ Uploading Dashboard...' : '🚀 Upload Dashboard to Sentry'}
+                  {sentryAuth.orgs?.map(org => (
+                    <option key={org.slug} value={org.slug}>{org.name}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+            {(sentryAuth.orgs?.length ?? 0) === 1 && (
+              <div className="flex items-center gap-2 text-xs text-white/50">
+                <CheckCircle2 size={12} className="text-green-400" />
+                Pushing to <span className="text-white font-medium">{sentryAuth.orgs![0].name}</span>
+              </div>
+            )}
+
+            {dashboardUrl ? (
+              <div className="flex items-center justify-between p-3 bg-green-900/15 border border-green-700/30 rounded-lg">
+                <div className="flex items-center gap-2 text-sm text-green-300">
+                  <CheckCircle2 size={14} className="text-green-400" />
+                  Dashboard created
+                </div>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => window.electronAPI.openInChrome(dashboardUrl)}
+                >
+                  View <ExternalLink size={11} className="ml-1" />
                 </Button>
               </div>
+            ) : (
+              <Button
+                size="lg"
+                fullWidth
+                onClick={handleUploadDashboard}
+                disabled={uploadingDashboard}
+              >
+                {uploadingDashboard ? 'Pushing…' : 'Push Dashboard to Sentry'}
+              </Button>
             )}
-          </>
-        ) : (
-          <div className="text-gray-400">Checking connection...</div>
-        )}
-      </div>
-
-      {/* GitHub Status */}
-      <div className="card p-6 mb-6">
-        <h2 className="text-2xl font-semibold text-white mb-4 flex items-center gap-2">
-          <span className="text-2xl">🐙</span> GitHub Connection
-        </h2>
-        
-        {githubStatus.authenticated ? (
-          <div className="flex items-center justify-between bg-green-900/20 p-4 rounded-lg border border-green-700/50">
-            <div>
-              <div className="text-green-100 font-medium">
-                ✓ Connected as @{githubStatus.username}
-              </div>
-              <div className="text-sm text-green-300 mt-1">
-                Ready to create repositories
-              </div>
-            </div>
-            <Button
-              size="sm"
-              variant="secondary"
-              onClick={async () => {
-                await window.electronAPI.logoutGitHub();
-                checkGitHubStatus();
-              }}
-            >
-              Disconnect
-            </Button>
           </div>
         ) : (
-          <div className="bg-yellow-900/20 p-4 rounded-lg border border-yellow-700/50">
-            <div className="text-yellow-100 font-medium mb-2">
-              ⚠️ GitHub not connected
+          <div className="space-y-3">
+            <div className="text-xs text-white/40 bg-white/3 border border-sentry-border rounded-lg px-3 py-2.5">
+              Connect Sentry in Settings for one-click push, or configure a manual token.
             </div>
-            <p className="text-sm text-yellow-300 mb-4">
-              You need to connect your GitHub account to publish repositories. Go to Settings to add your Personal Access Token.
-            </p>
             <div className="flex gap-2">
-              <Button onClick={() => window.location.href = '/#/settings'}>
+              <Button size="sm" variant="secondary" onClick={() => navigate('/settings')}>
                 Go to Settings
               </Button>
-              <Button variant="secondary" onClick={checkGitHubStatus}>
-                🔄 Refresh Status
+              <Button size="sm" variant="ghost" onClick={loadSentryAuth}>
+                <RefreshCw size={13} />
               </Button>
             </div>
           </div>
         )}
       </div>
 
-      {/* Repository Configuration */}
-      {githubStatus.authenticated && !publishResult && (
-        <div className="card p-6 mb-6">
-          <h2 className="text-2xl font-semibold text-white mb-4">
-            {hasExistingRepo ? 'Repository' : 'Repository Configuration'}
-          </h2>
+      {/* ── GitHub ── */}
+      <div className="card p-5">
+        <div className="flex items-center gap-2 mb-4">
+          <h2 className="text-sm font-semibold text-white">GitHub</h2>
+        </div>
 
+        {githubStatus.authenticated ? (
           <div className="space-y-4">
-            {hasExistingRepo ? (
-              <div className="bg-sentry-purple-900/20 border border-sentry-purple-700/50 rounded-lg p-4">
-                <div className="flex items-start gap-3">
-                  <div className="text-2xl">🔗</div>
-                  <div className="flex-1">
-                    <div className="font-medium text-sentry-purple-100 mb-1">
-                      Existing Repository: {repoConfig.name}
-                    </div>
-                    <p className="text-sm text-sentry-purple-300 mb-2">
-                      This project is already connected to a GitHub repository. Clicking "Push Update" will commit and push your latest changes.
-                    </p>
+            <div className="flex items-center justify-between p-3 rounded-lg bg-green-900/15 border border-green-700/30">
+              <div className="flex items-center gap-2 text-sm text-green-300">
+                <CheckCircle2 size={14} className="text-green-400" />
+                @{githubStatus.username}
+              </div>
+              <Button size="sm" variant="ghost" onClick={async () => {
+                await window.electronAPI.logoutGitHub();
+                checkGitHubStatus();
+                toast.info('GitHub disconnected');
+              }}>
+                Disconnect
+              </Button>
+            </div>
+
+            {!publishResult && (
+              <>
+                {hasExistingRepo ? (
+                  <div className="p-3 rounded-lg bg-sentry-purple-500/10 border border-sentry-purple-700/30 text-sm">
+                    <p className="text-sentry-purple-200 font-medium">{currentProject.project.githubRepoName}</p>
                     <button
-                      onClick={(e) => {
-                        e.preventDefault();
-                        window.electronAPI.openInChrome(currentProject?.project.githubRepoUrl!);
-                      }}
-                      className="text-sm text-sentry-purple-400 hover:text-sentry-purple-300 hover:underline cursor-pointer bg-transparent border-none p-0"
+                      onClick={() => window.electronAPI.openInChrome(currentProject.project.githubRepoUrl!)}
+                      className="text-xs text-sentry-purple-400 hover:underline mt-0.5"
                     >
                       View on GitHub →
                     </button>
                   </div>
-                </div>
-              </div>
-            ) : (
-              <>
-                <Input
-                  label="Repository Name"
-                  value={repoConfig.name}
-                  onChange={e => setRepoConfig({ ...repoConfig, name: e.target.value })}
-                  placeholder="my-sentry-demo"
-                />
-
-                <div>
-                  <label className="flex items-center cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={repoConfig.isPrivate}
-                      onChange={e => setRepoConfig({ ...repoConfig, isPrivate: e.target.checked })}
-                      className="mr-2 cursor-pointer"
+                ) : (
+                  <div className="space-y-3">
+                    <Input
+                      label="Repository Name"
+                      value={repoConfig.name}
+                      onChange={e => setRepoConfig({ ...repoConfig, name: e.target.value })}
+                      placeholder="my-sentry-demo"
                     />
-                    <span className="text-sm font-medium text-gray-300">
+                    <label className="flex items-center gap-2 cursor-pointer text-sm text-white/70">
+                      <input
+                        type="checkbox"
+                        checked={repoConfig.isPrivate}
+                        onChange={e => setRepoConfig({ ...repoConfig, isPrivate: e.target.checked })}
+                      />
                       Private repository
-                    </span>
-                  </label>
-                </div>
+                    </label>
+                  </div>
+                )}
+
+                <Button
+                  size="lg"
+                  fullWidth
+                  onClick={handlePublish}
+                  disabled={publishing || !repoConfig.name.trim()}
+                >
+                  {publishing
+                    ? (hasExistingRepo ? 'Pushing…' : 'Publishing…')
+                    : (hasExistingRepo ? 'Push Update to GitHub' : 'Publish to GitHub')}
+                </Button>
               </>
             )}
 
-            <div className="bg-blue-900/20 p-4 rounded-lg text-sm text-blue-300 border border-blue-700/50">
-              <strong className="text-blue-100">What will be {hasExistingRepo ? 'updated' : 'included'}:</strong>
-              <ul className="list-disc list-inside mt-2 space-y-1">
-                <li>Reference application (frontend + backend)</li>
-                <li>IMPLEMENTATION_GUIDE.md</li>
-                <li>sentry-dashboard.json</li>
-                <li>README with setup instructions</li>
-              </ul>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Publish Result */}
-      {publishResult && publishResult.success && (
-        <div className="bg-green-900/20 rounded-lg border border-green-700/50 p-6 mb-6">
-          <div className="flex items-start gap-4">
-            <div className="text-4xl">{publishResult.isUpdate ? '✅' : '🎉'}</div>
-            <div className="flex-1">
-              <h3 className="text-2xl font-semibold text-green-100 mb-2">
-                {publishResult.isUpdate ? 'Updates Pushed Successfully!' : 'Published Successfully!'}
-              </h3>
-              <p className="text-green-300 mb-4">
-                {publishResult.isUpdate
-                  ? 'Your latest changes have been committed and pushed to GitHub.'
-                  : 'Your reference app has been pushed to GitHub.'}
-              </p>
-              <div className="flex gap-3 flex-wrap">
-                {publishResult.repoUrl && (
-                  <Button
-                    onClick={() => window.electronAPI.openInChrome(publishResult.repoUrl!)}
-                  >
-                    View on GitHub →
+            {publishResult?.success && (
+              <div className="flex items-center justify-between p-3 bg-green-900/15 border border-green-700/30 rounded-lg">
+                <div className="flex items-center gap-2 text-sm text-green-300">
+                  <CheckCircle2 size={14} className="text-green-400" />
+                  {publishResult.isUpdate ? 'Pushed successfully' : 'Published successfully'}
+                </div>
+                <div className="flex gap-2">
+                  {publishResult.repoUrl && (
+                    <Button size="sm" variant="ghost" onClick={() => window.electronAPI.openInChrome(publishResult.repoUrl!)}>
+                      View <ExternalLink size={11} className="ml-1" />
+                    </Button>
+                  )}
+                  <Button size="sm" variant="ghost" onClick={() => setPublishResult(null)}>
+                    Push Again
                   </Button>
-                )}
-                <Button
-                  variant="secondary"
-                  onClick={handleExportDemoPackage}
-                  disabled={exporting}
-                >
-                  {exporting ? '⏳ Exporting...' : '📦 Export Package'}
-                </Button>
-                <Button
-                  variant="secondary"
-                  onClick={() => setPublishResult(null)}
-                >
-                  Push Another Update
-                </Button>
+                </div>
               </div>
-            </div>
+            )}
           </div>
-        </div>
-      )}
+        ) : (
+          <div className="space-y-3">
+            <div className="text-xs text-white/40 bg-white/3 border border-sentry-border rounded-lg px-3 py-2.5">
+              Add a GitHub Personal Access Token in Settings to publish repositories.
+            </div>
+            <Button size="sm" variant="secondary" onClick={() => navigate('/settings')}>
+              Go to Settings
+            </Button>
+          </div>
+        )}
+      </div>
 
-      {/* Actions */}
-      {githubStatus.authenticated && !publishResult && (
-        <div className="flex gap-4">
-          <Button
-            size="lg"
-            onClick={handlePublish}
-            disabled={publishing || !repoConfig.name.trim()}
-            className="flex-1"
-          >
-            {publishing
-              ? (hasExistingRepo ? '⏳ Pushing Update...' : '⏳ Publishing...')
-              : (hasExistingRepo ? '🔄 Push Update to GitHub' : '🚀 Publish to GitHub')}
-          </Button>
-        </div>
-      )}
+      {/* ── Export ── */}
+      <div className="card p-5">
+        <h2 className="text-sm font-semibold text-white mb-3">Export Demo Package</h2>
+        <p className="text-xs text-white/40 mb-3">Bundle the repo link, implementation guide, and dashboard config into a shareable package.</p>
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={async () => {
+            const result = await window.electronAPI.exportDemoPackage(currentProject.id);
+            if (result.success) toast.success('Package exported to ' + result.outputPath);
+            else toast.error('Export failed: ' + result.error);
+          }}
+        >
+          Export Package
+        </Button>
+      </div>
     </div>
   );
 }
