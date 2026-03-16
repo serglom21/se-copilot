@@ -32,8 +32,10 @@ export interface IElectronAPI {
 
   // Sentry API
   verifySentryConnection: () => Promise<{ success: boolean; organization?: string; error?: string }>;
-  createSentryDashboard: (projectId: string, dashboardTitle?: string) => Promise<{ success: boolean; dashboardUrl?: string; error?: string }>;
+  createSentryDashboard: (projectId: string, dashboardTitle?: string, credentials?: { authToken: string; organization: string }) => Promise<{ success: boolean; dashboardUrl?: string; error?: string }>;
   listSentryDashboards: () => Promise<{ success: boolean; dashboards?: any[]; error?: string }>;
+  listRecentSentryTraceIds: (projectSlug?: string) => Promise<{ success: boolean; traceIds?: string[]; error?: string }>;
+  fetchSentryTraceSpans: (traceIds: string[]) => Promise<{ success: boolean; spans?: any[]; error?: string }>;
 
   // File system
   getOutputPath: (projectId: string) => Promise<string>;
@@ -115,6 +117,8 @@ const electronAPI: IElectronAPI = {
   verifySentryConnection: () => ipcRenderer.invoke('sentry:verify-connection'),
   createSentryDashboard: (projectId, dashboardTitle, credentials) => ipcRenderer.invoke('sentry:create-dashboard', projectId, dashboardTitle, credentials),
   listSentryDashboards: () => ipcRenderer.invoke('sentry:list-dashboards'),
+  listRecentSentryTraceIds: (projectSlug) => ipcRenderer.invoke('sentry:list-recent-trace-ids', projectSlug),
+  fetchSentryTraceSpans: (traceIds) => ipcRenderer.invoke('sentry:fetch-trace-spans', traceIds),
 
   // File system
   getOutputPath: (projectId) => ipcRenderer.invoke('fs:get-output-path', projectId),

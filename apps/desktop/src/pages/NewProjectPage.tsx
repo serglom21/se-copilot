@@ -4,11 +4,19 @@ import * as Sentry from '@sentry/react';
 import { useProjectStore } from '../store/project-store';
 import Button from '../components/Button';
 import { Input, Textarea, Select } from '../components/Input';
+import { toast } from '../store/toast-store';
+
+const STACK_DESCRIPTIONS: Record<string, string> = {
+  web: 'Next.js frontend + Express backend, local dev servers',
+  mobile: 'React Native (Expo) + Express backend, Expo Snack simulator',
+  'backend-only-fastapi': 'FastAPI (async, auto-docs), local uvicorn server',
+  'backend-only-flask': 'Flask (lightweight), local dev server',
+};
 
 export default function NewProjectPage() {
   const navigate = useNavigate();
   const createProject = useProjectStore(state => state.createProject);
-  
+
   const [formData, setFormData] = useState({
     name: '',
     vertical: 'ecommerce' as const,
@@ -28,100 +36,81 @@ export default function NewProjectPage() {
     { value: 'saas', label: 'SaaS' },
     { value: 'gaming', label: 'Gaming' },
     { value: 'media', label: 'Media' },
-    { value: 'other', label: 'Other' }
+    { value: 'other', label: 'Other' },
   ];
 
   const stackOptions = [
-    { value: 'web', label: '🌐 Web App (Next.js + Express)' },
-    { value: 'mobile', label: '📱 Mobile App (React Native + Express)' },
-    { value: 'backend-only', label: '🐍 Backend Only (Python API)' }
+    { value: 'web', label: 'Web App (Next.js + Express)' },
+    { value: 'mobile', label: 'Mobile App (React Native + Express)' },
+    { value: 'backend-only', label: 'Backend Only (Python API)' },
   ];
 
   const pythonFrameworkOptions = [
-    { value: 'fastapi', label: 'FastAPI (Modern, async, auto-docs)' },
-    { value: 'flask', label: 'Flask (Lightweight, simple)' }
+    { value: 'fastapi', label: 'FastAPI (modern, async, auto-docs)' },
+    { value: 'flask', label: 'Flask (lightweight, simple)' },
   ];
+
+  const stackDescKey = formData.stackType === 'backend-only'
+    ? `backend-only-${formData.backendFramework}`
+    : formData.stackType;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    // Validation
-    const newErrors: Record<string, string> = {};
-    if (!formData.name.trim()) {
-      newErrors.name = 'Project name is required';
-    }
 
-    // Validate URL format if provided
+    const newErrors: Record<string, string> = {};
+    if (!formData.name.trim()) newErrors.name = 'Project name is required';
     if (formData.customerWebsite.trim()) {
-      try {
-        new URL(formData.customerWebsite);
-      } catch {
+      try { new URL(formData.customerWebsite); } catch {
         newErrors.customerWebsite = 'Please enter a valid URL (e.g., https://example.com)';
       }
     }
 
-    if (Object.keys(newErrors).length > 0) {
-      setErrors(newErrors);
-      return;
-    }
+    if (Object.keys(newErrors).length > 0) { setErrors(newErrors); return; }
 
     setLoading(true);
-
-    // Track project metadata
-    Sentry.setContext('project', {
-      vertical: formData.vertical,
-      stackType: formData.stackType,
-      backendFramework: formData.backendFramework,
-    });
+    Sentry.setContext('project', { vertical: formData.vertical, stackType: formData.stackType });
 
     try {
       const slug = formData.name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-
       const project = await createProject({
         project: {
-          name: formData.name,
-          slug,
+          name: formData.name, slug,
           vertical: formData.vertical,
           customerWebsite: formData.customerWebsite,
           notes: formData.notes,
           createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString()
+          updatedAt: new Date().toISOString(),
         },
         stack: {
           type: formData.stackType,
-          frontend: formData.stackType === 'backend-only' ? undefined : 
+          frontend: formData.stackType === 'backend-only' ? undefined :
                     (formData.stackType === 'web' ? 'nextjs' : 'react-native'),
           backend: formData.stackType === 'backend-only' ? formData.backendFramework : 'express',
-          ...(formData.stackType === 'mobile' && { mobile_framework: 'react-native' as const })
+          ...(formData.stackType === 'mobile' && { mobile_framework: 'react-native' as const }),
         },
-        instrumentation: {
-          transactions: [],
-          spans: []
-        },
-        dashboard: {
-          widgets: []
-        },
+        instrumentation: { transactions: [], spans: [] },
+        dashboard: { widgets: [] },
         chatHistory: [],
-        status: 'draft'
+        status: 'draft',
       });
 
       navigate(`/project/${project.id}/plan`);
     } catch (error) {
       Sentry.captureException(error);
-      setErrors({ submit: String(error) });
+      toast.error(String(error));
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="p-8 max-w-2xl mx-auto">
-      <div className="mb-8">
-        <h1 className="text-4xl font-bold text-white mb-2">New Project</h1>
-        <p className="text-gray-400 text-lg">Create a new Sentry demo project</p>
+    <div className="p-8 max-w-xl mx-auto">
+      <div className="mb-6">
+        <h1 className="text-2xl font-semibold text-white">New Project</h1>
+        <p className="text-sm text-white/45 mt-0.5">Create a new Sentry demo project</p>
       </div>
 
-      <form onSubmit={handleSubmit} className="card p-8 space-y-6">
+      <form onSubmit={handleSubmit} className="card p-6 space-y-5">
         <Input
           label="Project Name *"
           placeholder="My Customer Demo"
@@ -137,100 +126,56 @@ export default function NewProjectPage() {
           options={verticalOptions}
         />
 
-        <Select
-          label="Tech Stack *"
-          value={formData.stackType}
-          onChange={e => setFormData({ ...formData, stackType: e.target.value as 'web' | 'mobile' | 'backend-only' })}
-          options={stackOptions}
-        />
-
-        {formData.stackType === 'backend-only' && (
+        <div>
           <Select
-            label="Python Framework *"
-            value={formData.backendFramework}
-            onChange={e => setFormData({ ...formData, backendFramework: e.target.value as 'flask' | 'fastapi' })}
-            options={pythonFrameworkOptions}
+            label="Tech Stack *"
+            value={formData.stackType}
+            onChange={e => setFormData({ ...formData, stackType: e.target.value as any })}
+            options={stackOptions}
           />
-        )}
-
-        <Input
-          label="Customer Website"
-          placeholder="https://example.com"
-          value={formData.customerWebsite}
-          onChange={e => setFormData({ ...formData, customerWebsite: e.target.value })}
-          error={errors.customerWebsite}
-        />
-
-        <div className="bg-blue-900/20 p-4 rounded-lg border border-blue-700/50 -mt-3">
-          <div className="flex items-start gap-3">
-            <span className="text-blue-400 text-xl">ℹ️</span>
-            <div className="text-sm text-blue-200">
-              <p className="font-semibold mb-1 text-blue-100">How we use this information</p>
-              <p className="text-blue-300">
-                We'll analyze the website to provide specific performance metrics recommendations
-                tailored to your customer's use case. <strong className="text-blue-100">Company names and branding will never
-                appear in generated code</strong> – all examples remain abstract and generic.
-              </p>
-            </div>
-          </div>
+          {formData.stackType !== 'backend-only' && (
+            <p className="mt-1.5 text-xs text-white/35">{STACK_DESCRIPTIONS[stackDescKey]}</p>
+          )}
         </div>
 
-        {formData.stackType === 'web' && (
-          <div className="bg-blue-900/20 p-4 rounded-lg border border-blue-700/50">
-            <h3 className="font-semibold text-blue-100 mb-2">🌐 Web Stack Details</h3>
-            <div className="space-y-1 text-sm text-blue-300">
-              <div>✓ Frontend: Next.js (React framework)</div>
-              <div>✓ Backend: Express (Node.js)</div>
-              <div>✓ Deployment: Local dev servers</div>
-            </div>
-          </div>
-        )}
-
-        {formData.stackType === 'mobile' && (
-          <div className="bg-sentry-purple-900/20 p-4 rounded-lg border border-sentry-purple-700/50">
-            <h3 className="font-semibold text-sentry-purple-100 mb-2">📱 Mobile Stack Details</h3>
-            <div className="space-y-1 text-sm text-sentry-purple-300">
-              <div>✓ Frontend: React Native (Expo)</div>
-              <div>✓ Backend: Express (Node.js)</div>
-              <div>✓ Deployment: Expo Snack (browser simulator)</div>
-            </div>
-          </div>
-        )}
-
         {formData.stackType === 'backend-only' && (
-          <div className="bg-green-900/20 p-4 rounded-lg border border-green-700/50">
-            <h3 className="font-semibold text-green-100 mb-2">🐍 Python Backend Details</h3>
-            <div className="space-y-1 text-sm text-green-300">
-              <div>✓ Framework: {formData.backendFramework === 'fastapi' ? 'FastAPI (modern, async)' : 'Flask (lightweight)'}</div>
-              <div>✓ Features: RESTful API, Sentry instrumentation, auto-docs</div>
-              <div>✓ Deployment: Local dev server (uvicorn/flask)</div>
-            </div>
+          <div>
+            <Select
+              label="Python Framework *"
+              value={formData.backendFramework}
+              onChange={e => setFormData({ ...formData, backendFramework: e.target.value as any })}
+              options={pythonFrameworkOptions}
+            />
+            <p className="mt-1.5 text-xs text-white/35">{STACK_DESCRIPTIONS[stackDescKey]}</p>
           </div>
         )}
+
+        <div>
+          <Input
+            label="Customer Website"
+            placeholder="https://example.com"
+            value={formData.customerWebsite}
+            onChange={e => setFormData({ ...formData, customerWebsite: e.target.value })}
+            error={errors.customerWebsite}
+          />
+          <p className="mt-1.5 text-xs text-white/35">
+            Optional — AI will analyze the site for tailored span recommendations. Company names never appear in generated code.
+          </p>
+        </div>
 
         <Textarea
           label="Notes"
-          placeholder="Additional context about this demo (optional)"
+          placeholder="Additional context (optional)"
           value={formData.notes}
           onChange={e => setFormData({ ...formData, notes: e.target.value })}
-          rows={4}
+          rows={3}
         />
 
-        {errors.submit && (
-          <div className="bg-sentry-pink/20 text-sentry-pink-light p-4 rounded-lg text-sm border border-sentry-pink/50 font-medium">
-            {errors.submit}
-          </div>
-        )}
-
-        <div className="flex gap-3 pt-4">
-          <Button type="submit" disabled={loading} className="flex-1">
-            {loading ? 'Creating...' : 'Create Project'}
+        <div className="flex gap-3 pt-1">
+          <Button type="submit" disabled={loading} fullWidth>
+            {loading ? 'Creating…' : 'Create Project'}
           </Button>
-          <Button
-            type="button"
-            variant="secondary"
-            onClick={() => navigate('/')}
-          >
+          <Button type="button" variant="secondary" onClick={() => navigate('/')}>
             Cancel
           </Button>
         </div>

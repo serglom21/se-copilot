@@ -423,9 +423,9 @@ JSON STRUCTURE:
   "transactions": ["list of key transactions/endpoints"],
   "spans": [
     {
-      "name": "category.operation",
-      "op": "operation_type",
-      "layer": "frontend" or "backend",
+      "name": "checkout.validate_cart",
+      "op": "checkout",
+      "layer": "backend",
       "description": "Clear description of what this measures",
       "attributes": {
         "attribute_name": "What this attribute captures"
@@ -436,6 +436,10 @@ JSON STRUCTURE:
     }
   ]
 }
+
+CRITICAL: The "op" field MUST be the first segment of the span name (the category prefix before the first dot).
+Examples: name "checkout.validate_cart" → op "checkout", name "product.search" → op "product", name "payment.process" → op "payment".
+NEVER use "operation", "operation_type", "custom", or any generic placeholder as the op value.
 
 Return ONLY valid JSON.`
       },
@@ -558,9 +562,16 @@ SPAN QUALITY RULES:
       }
       
       const parsed = JSON.parse(jsonText);
+      const GENERIC_OPS_INIT = new Set(['operation', 'operation_type', 'custom', 'span', 'generic', '']);
+      const normalizedSpans = (parsed.spans || []).map((s: any) => {
+        const name = String(s.name || '');
+        const rawOp = String(s.op || '');
+        const op = GENERIC_OPS_INIT.has(rawOp.toLowerCase()) ? (name.split('.')[0] || rawOp) : rawOp;
+        return { ...s, op };
+      });
       return {
         transactions: parsed.transactions || [],
-        spans: parsed.spans || []
+        spans: normalizedSpans
       };
     } catch (error) {
       console.error('Failed to parse LLM response:', error);
@@ -757,9 +768,14 @@ Focus on practical, domain-specific instrumentation that helps identify real per
       return `/${namespace}/${action}`;
     };
 
+    // Assign HTTP method per span — must match the backend route generation logic exactly.
+    const FE_READ_KEYWORDS = ['fetch', 'load', 'get', 'list', 'read', 'query', 'search', 'filter', 'view', 'show', 'detail'];
+    const feSpanMethod = (spanName: string): string =>
+      FE_READ_KEYWORDS.some(k => spanName.toLowerCase().includes(k)) ? 'GET' : 'POST';
+
     // Build the API endpoint contract so frontend and backend agree on ALL spans
     const apiEndpoints = allSpansList.map(s =>
-      `- trace_${s.name.replace(/\./g, '_')} → POST /api${deriveApiEndpoint(s.name)}`
+      `- trace_${s.name.replace(/\./g, '_')} → ${feSpanMethod(s.name)} /api${deriveApiEndpoint(s.name)}`
     ).join('\n');
 
     const exampleEndpoint = firstSpan ? deriveApiEndpoint(firstSpan.name).slice(1) : 'signup/submit';
@@ -787,6 +803,8 @@ Match the endpoint path exactly as listed above for each span.
 5. Set all required attributes listed for each span
 6. Use the EXACT API endpoints from the contract above — do NOT invent different route paths
 7. CRITICAL — Trace function signature: ALWAYS call as \`await traceFunc(async () => { /* work */ }, { attr: value })\`. The FIRST argument MUST be an async callback function — NEVER a string, field name, or any other type. Example WRONG: \`trace_input_focus('email', ...)\`. Example CORRECT: \`await trace_input_focus(async () => {}, { field_name: 'email' })\`
+8. NEVER wrap fetch() in \`Sentry.startSpan({ op: 'http.client', ... })\`. The Sentry SDK automatically instruments every fetch() call as an http.client span — adding a manual wrapper creates TWO http.client spans for the same request. Instead, wrap fetch() inside your CUSTOM instrumentation span (e.g. \`await trace_product_search(async () => { const r = await fetch(...); }, {...})\`) which gives you the correct hierarchy: custom span → auto-instrumented http.client child.
+9. Use the correct HTTP method from the endpoint contract: GET endpoints use \`fetch(url)\` (no method needed), POST endpoints use \`fetch(url, { method: 'POST', ... })\`
 
 **IMPORTANT — BUILD FOR THIS SPECIFIC PROJECT:**
 - Base all pages, routes, and data models on the project name, requirements, and custom spans above
@@ -1181,12 +1199,19 @@ Return ONLY valid JSON in this exact format (no markdown):
       return `/${namespace}/${action}`;
     };
 
-    // Build explicit route contract from ALL spans (frontend pages call all of them)
+    // Assign HTTP method per span: GET for reads, POST for writes.
+    // "Read" keywords match the action part of span names (e.g. product.fetch_details → fetch → GET).
+    const READ_KEYWORDS = ['fetch', 'load', 'get', 'list', 'read', 'query', 'search', 'filter', 'view', 'show', 'detail'];
+    const spanMethod = (spanName: string): string =>
+      READ_KEYWORDS.some(k => spanName.toLowerCase().includes(k)) ? 'GET' : 'POST';
+
+    // Build explicit route contract from ALL spans (frontend pages call all of them).
+    // Each span MUST have a UNIQUE method+path — never collapse multiple spans onto one route.
     const allSpansForRoutes = project.instrumentation.spans;
     const requiredRoutes = allSpansForRoutes.map(s => {
       const route = deriveRouteEndpoint(s.name);
       const fn = `trace_${s.name.replace(/\./g, '_')}`;
-      return `- POST ${route}  → call ${fn}`;
+      return `- ${spanMethod(s.name)} /api${route}  → call ${fn}`;
     }).join('\n');
 
     const firstAnySpan = allSpansForRoutes[0];
@@ -1226,12 +1251,16 @@ ${requiredRoutes || '- Derive routes from the backend spans above'}
 1. Implement EVERY route listed above — the frontend will call these exact paths
 2. Import ALL instrumentation from '../utils/instrumentation'
 3. Use pattern: \`const { trace_span_name } = require('../utils/instrumentation');\`
-4. Call trace functions within routes with meaningful attributes from req.body / req.params
+4. Call trace functions within routes with meaningful attributes from req.body / req.params / req.query
 5. Return mock data that matches the domain of "${project.project.name}"
+6. Use the EXACT HTTP method shown (GET or POST) — GET for data-fetching, POST for mutations
+7. EVERY span gets its OWN unique route. NEVER register two spans on the same method+path.
+   WRONG (collapsed): router.post('/operation', ...) × 3  ← only the first ever fires in Express
+   CORRECT (unique):  router.get('/product/fetch-details', ...) and router.post('/payment/process-payment', ...)
 
 **IMPORTANT:**
 - DO NOT generate generic e-commerce routes (products/cart/checkout) unless this is explicitly an e-commerce project
-- Route paths are EXACTLY as specified in REQUIRED ROUTES above — do not rename them
+- Route paths are EXACTLY as specified in REQUIRED ROUTES above — do not rename them or use op-based names
 - CRITICAL: Span attribute keys with dots MUST be quoted strings. CORRECT: \`{ 'http.method': value }\`. WRONG: \`{ http.method: value }\` — this is a JavaScript SyntaxError
 
 **CODE PATTERN:**
@@ -1241,8 +1270,8 @@ const router = express.Router();
 const Sentry = require('@sentry/node');
 const { ${allSpanImports || 'trace_main_operation'} } = require('../utils/instrumentation');
 
-// Implement required route — use exact path from REQUIRED ROUTES list
-router.post('${exampleRoute}', async (req, res) => {
+// Each span gets its OWN route — never collapse multiple spans onto the same path
+router.get('${exampleRoute}', async (req, res) => {
   try {
     await ${exampleTraceFn}(async () => {
       await new Promise(resolve => setTimeout(resolve, Math.random() * 300 + 100));
@@ -1875,8 +1904,8 @@ Return a JSON object with this exact structure:
   "message": "A brief 2-3 sentence conversational message explaining what you are suggesting and why these spans are valuable for this specific project",
   "spans": [
     {
-      "name": "operation.specific_action",
-      "op": "operation",
+      "name": "checkout.validate_cart",
+      "op": "checkout",
       "layer": "backend",
       "description": "What this span measures",
       "attributes": {
@@ -1892,6 +1921,7 @@ Requirements:
 - Each span should have 2-4 meaningful attributes
 - Mark any PII attributes (email, name, address, card, etc.) in the pii.keys array
 - Span names must use snake_case dot notation (e.g., checkout.validate_cart)
+- CRITICAL: The "op" field MUST be the first segment of the span name (e.g., name "checkout.validate_cart" → op "checkout"). NEVER use "operation" or any generic placeholder.
 - Only return the JSON object`
       }
     ];
@@ -1905,16 +1935,24 @@ Requirements:
 
     const parsed = JSON.parse(cleaned);
 
-    const spans: SpanDefinition[] = (parsed.spans || []).map((s: any) => ({
-      name: String(s.name || ''),
-      op: String(s.op || (s.name || '').split('.')[0] || ''),
-      layer: s.layer === 'frontend' ? 'frontend' as const : 'backend' as const,
-      description: String(s.description || ''),
-      attributes: (s.attributes && typeof s.attributes === 'object')
-        ? Object.fromEntries(Object.entries(s.attributes).map(([k, v]) => [k, String(v)]))
-        : {},
-      pii: { keys: Array.isArray(s.pii?.keys) ? s.pii.keys : [] }
-    })).filter((s: SpanDefinition) => s.name.length > 0);
+    const GENERIC_OPS = new Set(['operation', 'operation_type', 'custom', 'span', 'generic', '']);
+    const spans: SpanDefinition[] = (parsed.spans || []).map((s: any) => {
+      const name = String(s.name || '');
+      const derivedOp = name.split('.')[0] || '';
+      const rawOp = String(s.op || '');
+      // If LLM returned a generic placeholder, derive op from the span name prefix instead
+      const op = GENERIC_OPS.has(rawOp.toLowerCase()) ? derivedOp : rawOp;
+      return {
+        name,
+        op,
+        layer: s.layer === 'frontend' ? 'frontend' as const : 'backend' as const,
+        description: String(s.description || ''),
+        attributes: (s.attributes && typeof s.attributes === 'object')
+          ? Object.fromEntries(Object.entries(s.attributes).map(([k, v]) => [k, String(v)]))
+          : {},
+        pii: { keys: Array.isArray(s.pii?.keys) ? s.pii.keys : [] }
+      };
+    }).filter((s: SpanDefinition) => s.name.length > 0);
 
     return {
       message: String(parsed.message || 'I have some custom span suggestions for your project.'),

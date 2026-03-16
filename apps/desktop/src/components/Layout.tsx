@@ -1,97 +1,136 @@
-import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
+import { Outlet, Link, useLocation } from 'react-router-dom';
+import {
+  Home, Plus, FileText, Zap, Wrench, Play, Terminal, Upload, Activity, Settings,
+  CheckCircle2
+} from 'lucide-react';
 import { useProjectStore } from '../store/project-store';
+
+const STATUS_ORDER = ['draft', 'planning', 'locked', 'generated', 'published'];
+const STATUS_COLORS: Record<string, string> = {
+  draft: 'bg-white/30',
+  planning: 'bg-blue-400',
+  locked: 'bg-yellow-400',
+  generated: 'bg-green-400',
+  published: 'bg-sentry-purple-400',
+};
+
+function statusAtLeast(current: string, required: string) {
+  return STATUS_ORDER.indexOf(current) >= STATUS_ORDER.indexOf(required);
+}
 
 export default function Layout() {
   const location = useLocation();
-  const navigate = useNavigate();
   const currentProject = useProjectStore(state => state.currentProject);
-
-  const isProjectRoute = location.pathname.startsWith('/project/');
 
   return (
     <div className="flex h-screen bg-sentry-background">
       {/* Sidebar */}
-      <div className="w-64 bg-sentry-gradient-dark text-white flex flex-col border-r border-sentry-border shadow-2xl">
-        <div className="p-6 border-b border-sentry-border">
-          <div className="flex items-center gap-3 mb-2">
-            <div className="w-10 h-10 rounded-lg bg-sentry-gradient flex items-center justify-center text-2xl shadow-sentry">
-              🔮
+      <div className="w-52 bg-sentry-gradient-dark text-white flex flex-col border-r border-sentry-border shrink-0">
+        {/* Brand */}
+        <div className="px-4 py-5 border-b border-sentry-border">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-md bg-sentry-gradient flex items-center justify-center text-base shadow-sentry shrink-0">
+              ◈
             </div>
             <div>
-              <h1 className="text-xl font-bold text-gradient">SE Copilot</h1>
-              <p className="text-xs text-gray-400">Demo Builder</p>
+              <div className="text-sm font-semibold text-gradient leading-none">SE Copilot</div>
+              <div className="text-[10px] text-white/35 mt-0.5">Demo Builder</div>
             </div>
           </div>
         </div>
 
-        <nav className="flex-1 px-4 space-y-1 py-4">
-          <NavLink to="/" active={location.pathname === '/'}>
-            <span className="text-lg mr-2">🏠</span> Home
-          </NavLink>
-          <NavLink to="/new" active={location.pathname === '/new'}>
-            <span className="text-lg mr-2">✨</span> New Project
-          </NavLink>
+        {/* Nav */}
+        <nav className="flex-1 px-3 py-3 space-y-0.5 overflow-y-auto">
+          <NavItem to="/" active={location.pathname === '/'} icon={<Home size={15} />}>
+            Home
+          </NavItem>
+          <NavItem to="/new" active={location.pathname === '/new'} icon={<Plus size={15} />}>
+            New Project
+          </NavItem>
 
           {currentProject && (
             <>
-              <div className="pt-6 pb-2 text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                Current Project
+              <div className="pt-4 pb-1.5 px-2 flex items-center gap-2">
+                <span className="text-[10px] font-semibold text-white/35 uppercase tracking-widest">Project</span>
               </div>
-              <div className="text-sm text-white px-3 py-2.5 bg-sentry-gradient rounded-lg mb-2 font-medium shadow-sentry">
-                <div className="flex items-center gap-2">
-                  <span className="text-base">📁</span>
-                  <span className="truncate">{currentProject.project.name}</span>
-                </div>
+
+              {/* Project name + status dot */}
+              <div className="flex items-center gap-2 px-2 py-1.5 mb-1">
+                <span className={`w-2 h-2 rounded-full shrink-0 ${STATUS_COLORS[currentProject.status] || 'bg-white/30'}`} />
+                <span className="text-xs text-white/70 truncate font-medium">{currentProject.project.name}</span>
               </div>
-              <NavLink
+
+              <NavItem
                 to={`/project/${currentProject.id}/plan`}
                 active={location.pathname.includes('/plan')}
+                icon={<FileText size={15} />}
+                done={statusAtLeast(currentProject.status, 'locked')}
               >
-                <span className="text-lg mr-2">📋</span> Planning
-              </NavLink>
-              <NavLink
+                Planning
+              </NavItem>
+              <NavItem
                 to={`/project/${currentProject.id}/generate`}
                 active={location.pathname.includes('/generate')}
-                disabled={currentProject.status === 'draft'}
+                icon={<Zap size={15} />}
+                disabled={!statusAtLeast(currentProject.status, 'planning')}
+                done={statusAtLeast(currentProject.status, 'generated')}
+                disabledHint="Complete Planning first"
               >
-                <span className="text-lg mr-2">⚡</span> Generate
-              </NavLink>
-              <NavLink
+                Generate
+              </NavItem>
+              <NavItem
                 to={`/project/${currentProject.id}/refine`}
                 active={location.pathname.includes('/refine')}
-                disabled={currentProject.status !== 'generated' && currentProject.status !== 'published'}
+                icon={<Wrench size={15} />}
+                disabled={!statusAtLeast(currentProject.status, 'generated')}
+                disabledHint="Generate first"
               >
-                <span className="text-lg mr-2">🔧</span> Refine
-              </NavLink>
-              <NavLink
+                Refine
+              </NavItem>
+              <NavItem
                 to={`/project/${currentProject.id}/data`}
                 active={location.pathname.includes('/data')}
-                disabled={currentProject.status !== 'generated' && currentProject.status !== 'published'}
+                icon={<Play size={15} />}
+                disabled={!statusAtLeast(currentProject.status, 'generated')}
+                disabledHint="Generate first"
               >
-                <span className="text-lg mr-2">🎲</span> Run Data
-              </NavLink>
-              <NavLink
+                Run Data
+              </NavItem>
+              <NavItem
                 to={`/project/${currentProject.id}/deploy`}
                 active={location.pathname.includes('/deploy')}
-                disabled={currentProject.status !== 'generated' && currentProject.status !== 'published'}
+                icon={<Terminal size={15} />}
+                disabled={!statusAtLeast(currentProject.status, 'generated')}
+                disabledHint="Generate first"
               >
-                <span className="text-lg mr-2">🖥️</span> Deploy
-              </NavLink>
-              <NavLink
+                Deploy
+              </NavItem>
+              <NavItem
                 to={`/project/${currentProject.id}/publish`}
                 active={location.pathname.includes('/publish')}
-                disabled={currentProject.status !== 'generated' && currentProject.status !== 'published'}
+                icon={<Upload size={15} />}
+                disabled={!statusAtLeast(currentProject.status, 'generated')}
+                disabledHint="Generate first"
               >
-                <span className="text-lg mr-2">🚀</span> Publish
-              </NavLink>
+                Publish
+              </NavItem>
+              <NavItem
+                to={`/project/${currentProject.id}/trace-health`}
+                active={location.pathname.includes('/trace-health')}
+                icon={<Activity size={15} />}
+                disabled={!statusAtLeast(currentProject.status, 'generated')}
+                disabledHint="Generate first"
+              >
+                Trace Health
+              </NavItem>
             </>
           )}
         </nav>
 
-        <div className="p-4 border-t border-sentry-border">
-          <NavLink to="/settings" active={location.pathname === '/settings'}>
-            <span className="text-lg mr-2">⚙️</span> Settings
-          </NavLink>
+        <div className="px-3 py-3 border-t border-sentry-border">
+          <NavItem to="/settings" active={location.pathname === '/settings'} icon={<Settings size={15} />}>
+            Settings
+          </NavItem>
         </div>
       </div>
 
@@ -103,30 +142,50 @@ export default function Layout() {
   );
 }
 
-interface NavLinkProps {
+interface NavItemProps {
   to: string;
   active: boolean;
+  icon: React.ReactNode;
   disabled?: boolean;
+  done?: boolean;
+  disabledHint?: string;
   children: React.ReactNode;
 }
 
-function NavLink({ to, active, disabled, children }: NavLinkProps) {
-  const className = `
-    flex items-center px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200
+function NavItem({ to, active, icon, disabled, done, disabledHint, children }: NavItemProps) {
+  const base = `
+    flex items-center justify-between w-full px-2.5 py-2 rounded-md text-[13px] font-medium transition-all duration-150
     ${active
       ? 'bg-sentry-purple-500 text-white shadow-sentry'
-      : 'text-gray-300 hover:bg-white/5 hover:text-white hover:translate-x-0.5'
+      : disabled
+        ? 'text-white/30 cursor-not-allowed'
+        : 'text-white/65 hover:bg-white/6 hover:text-white'
     }
-    ${disabled ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}
   `;
 
+  const inner = (
+    <>
+      <span className="flex items-center gap-2">
+        <span className="shrink-0">{icon}</span>
+        {children}
+      </span>
+      {done && !active && (
+        <CheckCircle2 size={13} className="text-green-400 shrink-0" />
+      )}
+    </>
+  );
+
   if (disabled) {
-    return <div className={className}>{children}</div>;
+    return (
+      <div className={base} title={disabledHint}>
+        {inner}
+      </div>
+    );
   }
 
   return (
-    <Link to={to} className={className}>
-      {children}
+    <Link to={to} className={base}>
+      {inner}
     </Link>
   );
 }

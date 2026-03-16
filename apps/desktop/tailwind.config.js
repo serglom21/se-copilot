@@ -29,6 +29,7 @@ module.exports = {
           },
           coral: '#F55459',
           // UI colors
+          surface: '#1F1830',
           background: {
             DEFAULT: '#1D1127',
             secondary: '#241734',

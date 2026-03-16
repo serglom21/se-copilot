@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import Button from './Button';
-import { Input } from './Input';
+import { X, Bot, Send } from 'lucide-react';
 
 interface Message {
   role: 'user' | 'assistant' | 'system';
@@ -23,20 +22,13 @@ export default function TroubleshootingChat({ context, onClose }: Troubleshootin
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
-  const [renderError, setRenderError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    try {
-      // Auto-send context on mount
-      if (context.errors && context.errors.length > 0) {
-        const errorSummary = context.errors.slice(-5).join('\n');
-        const contextMessage = `I'm having an issue with ${context.phase}. Here are the recent errors:\n\n${errorSummary}\n\nCan you help me fix this?`;
-        handleSendMessage(contextMessage, true);
-      }
-    } catch (error) {
-      console.error('Error in useEffect:', error);
-      setRenderError(String(error));
+    if (context.errors?.length > 0) {
+      const summary = context.errors.slice(-5).join('\n');
+      handleSend(`I'm having an issue with ${context.phase}. Here are the recent errors:\n\n${summary}\n\nCan you help me fix this?`, true);
     }
   }, []);
 
@@ -44,206 +36,101 @@ export default function TroubleshootingChat({ context, onClose }: Troubleshootin
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const handleSendMessage = async (message?: string, isAuto = false) => {
-    const messageToSend = message || input;
-    if (!messageToSend.trim() || loading) return;
+  const handleSend = async (message?: string, isAuto = false) => {
+    const text = message || input;
+    if (!text.trim() || loading) return;
+    if (!isAuto) setInput('');
 
-    if (!isAuto) {
-      setInput('');
-    }
-
-    const userMessage: Message = {
-      role: 'user',
-      content: messageToSend,
-      timestamp: new Date()
-    };
-
-    setMessages(prev => [...prev, userMessage]);
+    setMessages(prev => [...prev, { role: 'user', content: text, timestamp: new Date() }]);
     setLoading(true);
 
     try {
-      // Build context for AI
-      const systemContext = buildSystemContext();
-      
-      console.log('Sending message to AI...', { projectId: context.projectId });
-      
-      const response = await window.electronAPI.sendChatMessage(context.projectId, 
-        `${systemContext}\n\nUser question: ${messageToSend}`
-      );
-
-      console.log('Received response:', response);
-
-      // Validate response
-      if (!response || typeof response !== 'object') {
-        throw new Error('Invalid response format from AI');
-      }
-
-      if (!response.content) {
-        throw new Error('AI response missing content');
-      }
-
-      const assistantMessage: Message = {
-        role: 'assistant',
-        content: String(response.content), // Ensure it's a string
-        timestamp: new Date()
-      };
-
-      console.log('Adding assistant message:', assistantMessage);
-      setMessages(prev => [...prev, assistantMessage]);
-    } catch (error) {
-      console.error('Chat error:', error);
-      const errorMessage: Message = {
-        role: 'system',
-        content: `Error: ${error instanceof Error ? error.message : String(error)}. Please try again or check your LLM configuration in Settings.`,
-        timestamp: new Date()
-      };
-      setMessages(prev => [...prev, errorMessage]);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const buildSystemContext = (): string => {
-    try {
       const recentOutput = (context.output || []).slice(-20).join('\n');
       const recentErrors = (context.errors || []).slice(-10).join('\n');
-    
-    let contextStr = `You are a helpful troubleshooting assistant for SE Copilot. The user is experiencing issues during ${context.phase}.\n\n`;
-    
-    if (context.phase === 'deployment') {
-      contextStr += `DEPLOYMENT CONTEXT:
-- Deploying a Next.js frontend (port 3000) and Express backend (port 3001)
-- Using npm to install dependencies and run dev servers
-- Common issues: port conflicts, missing dependencies, Sentry config errors
 
-`;
-    } else {
-      contextStr += `DATA GENERATION CONTEXT:
-- Running a Python script to generate test data for Sentry
-- Using pip to install dependencies (sentry-sdk, faker, requests, python-dotenv)
-- Common issues: Python not installed, missing packages, invalid DSNs
+      let ctx = `You are a concise troubleshooting assistant for SE Copilot. The user has an issue during ${context.phase}.\n\n`;
+      if (context.phase === 'deployment') {
+        ctx += `Context: Deploying Next.js (port 3000) + Express (port 3001). Common issues: port conflicts, missing deps, Sentry config.\n\n`;
+      } else {
+        ctx += `Context: Running data generator (Live = Puppeteer + real SDKs, Script = Python sentry-sdk). Common issues: missing Node/Python, invalid DSN.\n\n`;
+      }
+      if (recentErrors) ctx += `Recent errors:\n${recentErrors}\n\n`;
+      if (recentOutput) ctx += `Recent output:\n${recentOutput}\n\n`;
+      ctx += `Instructions: Be brief, actionable. Format commands in code blocks.\n\n`;
 
-`;
-    }
+      const response = await window.electronAPI.sendChatMessage(context.projectId, `${ctx}User: ${text}`);
 
-    if (recentErrors) {
-      contextStr += `RECENT ERRORS:\n${recentErrors}\n\n`;
-    }
-
-    if (recentOutput) {
-      contextStr += `RECENT OUTPUT:\n${recentOutput}\n\n`;
-    }
-
-    contextStr += `INSTRUCTIONS:
-1. Analyze the error and output
-2. Provide a clear, concise explanation of what went wrong
-3. Give specific step-by-step fix instructions
-4. If it's a command to run, format it clearly
-5. Keep responses brief and actionable
-
-`;
-
-      return contextStr;
+      if (!response?.content) throw new Error('No response from AI');
+      setMessages(prev => [...prev, { role: 'assistant', content: String(response.content), timestamp: new Date() }]);
     } catch (error) {
-      console.error('Error building context:', error);
-      return 'Error building context. Please describe your issue manually.';
+      setMessages(prev => [...prev, {
+        role: 'system',
+        content: `Could not reach AI: ${error instanceof Error ? error.message : String(error)}. Check your LLM settings.`,
+        timestamp: new Date()
+      }]);
+    } finally {
+      setLoading(false);
+      setTimeout(() => inputRef.current?.focus(), 50);
     }
   };
 
-  if (renderError) {
-    return (
-      <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-        <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-6">
-          <h2 className="text-xl font-bold text-red-600 mb-4">Error</h2>
-          <p className="text-gray-700 mb-4">{renderError}</p>
-          <button
-            onClick={onClose}
-            className="w-full bg-purple-600 text-white px-4 py-2 rounded-lg hover:bg-purple-700"
-          >
-            Close
-          </button>
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div className="bg-white rounded-lg shadow-xl w-full max-w-3xl h-[600px] flex flex-col">
+    <div className="fixed inset-0 bg-black/75 backdrop-blur-sm flex items-end sm:items-center justify-center p-4 z-50" onClick={onClose}>
+      <div
+        className="bg-sentry-background-secondary border border-sentry-border rounded-xl w-full max-w-2xl flex flex-col shadow-sentry-lg"
+        style={{ height: 'min(580px, 85vh)' }}
+        onClick={e => e.stopPropagation()}
+      >
         {/* Header */}
-        <div className="p-4 border-b border-gray-200 flex items-center justify-between">
-          <div>
-            <h2 className="text-xl font-bold text-gray-900">🤖 AI Troubleshooter</h2>
-            <p className="text-sm text-gray-600">
-              Ask me about {context.phase === 'deployment' ? 'deployment' : 'data generation'} issues
-            </p>
+        <div className="flex items-center justify-between px-4 py-3.5 border-b border-sentry-border">
+          <div className="flex items-center gap-2.5">
+            <div className="w-7 h-7 rounded-md bg-sentry-gradient flex items-center justify-center">
+              <Bot size={14} className="text-white" />
+            </div>
+            <div>
+              <div className="text-sm font-semibold text-white">AI Troubleshooter</div>
+              <div className="text-[11px] text-white/35 capitalize">{context.phase.replace('-', ' ')} issues</div>
+            </div>
           </div>
-          <button
-            onClick={onClose}
-            className="text-gray-400 hover:text-gray-600 text-2xl"
-          >
-            ×
+          <button onClick={onClose} className="text-white/30 hover:text-white/70 transition-colors p-1">
+            <X size={16} />
           </button>
         </div>
 
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          {messages.length === 0 && (
-            <div className="text-center py-12 text-gray-500">
-              <div className="text-5xl mb-4">🤖</div>
-              <p className="font-medium">Hi! I'm here to help troubleshoot issues.</p>
-              <p className="text-sm mt-2">Describe your problem and I'll help you fix it.</p>
+        <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
+          {messages.length === 0 && !loading && (
+            <div className="flex flex-col items-center justify-center h-full text-center">
+              <div className="w-10 h-10 rounded-full bg-sentry-surface border border-sentry-border flex items-center justify-center mb-3">
+                <Bot size={18} className="text-white/30" />
+              </div>
+              <p className="text-sm text-white/45">Describe your issue and I'll help fix it.</p>
+              <p className="text-xs text-white/25 mt-1">I can already see your recent errors and output.</p>
             </div>
           )}
 
-          {messages.map((msg, idx) => {
-            try {
-              return (
-                <div
-                  key={idx}
-                  className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                >
-                  <div
-                    className={`max-w-[80%] rounded-lg p-3 ${
-                      msg.role === 'user'
-                        ? 'bg-purple-600 text-white'
-                        : msg.role === 'system'
-                        ? 'bg-red-50 text-red-800 border border-red-200'
-                        : 'bg-gray-100 text-gray-900'
-                    }`}
-                  >
-                    {msg.role === 'assistant' && (
-                      <div className="flex items-center gap-2 mb-2 text-sm font-medium">
-                        <span>🤖</span>
-                        <span>AI Assistant</span>
-                      </div>
-                    )}
-                    <div className="whitespace-pre-wrap text-sm break-words">
-                      {msg.content || '(empty response)'}
-                    </div>
-                    <div className="text-xs mt-2 opacity-70">
-                      {msg.timestamp?.toLocaleTimeString() || 'Unknown time'}
-                    </div>
-                  </div>
-                </div>
-              );
-            } catch (error) {
-              console.error('Error rendering message:', error, msg);
-              return (
-                <div key={idx} className="text-red-500 text-sm p-2">
-                  Error rendering message
-                </div>
-              );
-            }
-          })}
+          {messages.map((msg, idx) => (
+            <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+              <div className={`max-w-[85%] rounded-xl px-3.5 py-2.5 text-sm ${
+                msg.role === 'user'
+                  ? 'bg-sentry-purple-500/20 border border-sentry-purple-500/30 text-white/90'
+                  : msg.role === 'system'
+                    ? 'bg-sentry-pink/10 border border-sentry-pink/30 text-sentry-pink'
+                    : 'bg-sentry-surface border border-sentry-border text-white/85'
+              }`}>
+                {msg.role === 'assistant' && (
+                  <div className="text-[10px] text-white/30 uppercase tracking-widest mb-1.5">Assistant</div>
+                )}
+                <div className="whitespace-pre-wrap break-words leading-relaxed">{msg.content}</div>
+                <div className="text-[10px] text-white/20 mt-1.5">{msg.timestamp?.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+              </div>
+            </div>
+          ))}
 
           {loading && (
             <div className="flex justify-start">
-              <div className="bg-gray-100 rounded-lg p-3">
-                <div className="flex items-center gap-2 text-gray-600">
-                  <div className="animate-spin">⏳</div>
-                  <span className="text-sm">Thinking...</span>
-                </div>
+              <div className="bg-sentry-surface border border-sentry-border rounded-xl px-4 py-3">
+                <TypingDots />
               </div>
             </div>
           )}
@@ -252,33 +139,48 @@ export default function TroubleshootingChat({ context, onClose }: Troubleshootin
         </div>
 
         {/* Input */}
-        <div className="p-4 border-t border-gray-200">
-          <div className="flex gap-2">
-            <Input
+        <div className="px-4 py-3 border-t border-sentry-border">
+          <div className="flex items-center gap-2 bg-sentry-surface border border-sentry-border rounded-xl px-3 py-2 focus-within:ring-1 focus-within:ring-sentry-purple-500 transition-all">
+            <input
+              ref={inputRef}
               value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSendMessage();
-                }
-              }}
-              placeholder="Describe your issue or ask a question..."
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
+              placeholder="Describe your issue…"
               disabled={loading}
-              className="flex-1"
+              className="flex-1 bg-transparent text-sm text-white placeholder:text-white/25 focus:outline-none"
             />
-            <Button
-              onClick={() => handleSendMessage()}
+            <button
+              onClick={() => handleSend()}
               disabled={loading || !input.trim()}
+              className="text-white/30 hover:text-sentry-purple-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors p-0.5"
             >
-              Send
-            </Button>
+              <Send size={15} />
+            </button>
           </div>
-          <div className="mt-2 text-xs text-gray-500">
-            💡 Tip: I can see your recent errors and output. Just describe what you're trying to do!
-          </div>
+          <p className="text-[11px] text-white/20 mt-1.5 px-1">Press Enter to send · I can see your recent errors and output</p>
         </div>
       </div>
+    </div>
+  );
+}
+
+function TypingDots() {
+  return (
+    <div className="flex items-center gap-1 py-0.5">
+      {[0, 1, 2].map(i => (
+        <span
+          key={i}
+          className="w-1.5 h-1.5 rounded-full bg-white/35"
+          style={{ animation: `typing-dot 1.2s ${i * 0.2}s ease-in-out infinite` }}
+        />
+      ))}
+      <style>{`
+        @keyframes typing-dot {
+          0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+          30% { opacity: 1; transform: translateY(-3px); }
+        }
+      `}</style>
     </div>
   );
 }

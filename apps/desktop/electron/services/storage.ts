@@ -128,6 +128,23 @@ export class StorageService {
     }
   }
 
+  /** Returns the output path for a project without creating it. Returns null if project not found. */
+  resolveOutputPath(projectId: string): string | null {
+    try {
+      const project = this.getProject(projectId);
+      return path.join(this.outputDir, project.project.slug);
+    } catch {
+      return null;
+    }
+  }
+
+  deleteProjectOutput(projectId: string): void {
+    const outputPath = this.resolveOutputPath(projectId);
+    if (outputPath && fs.existsSync(outputPath)) {
+      fs.rmSync(outputPath, { recursive: true, force: true });
+    }
+  }
+
   getOutputPath(projectId: string): string {
     const project = this.getProject(projectId);
     const outputPath = path.join(this.outputDir, project.project.slug);

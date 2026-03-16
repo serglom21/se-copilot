@@ -1099,11 +1099,38 @@ export default function RootLayout({
     // Generate vertical-specific pages
     const pageConfig = this.getVerticalPageConfig(vertical, project.project.name);
 
+    // Find the best span to wrap the main data load — prefer list/search/load/fetch spans
+    const READ_KW = ['list', 'search', 'load', 'fetch', 'filter', 'query', 'get'];
+    const primarySpan = project.instrumentation.spans.find(s =>
+      READ_KW.some(k => s.name.toLowerCase().includes(k))
+    ) || project.instrumentation.spans[0] || null;
+    const primarySpanFn = primarySpan ? `trace_${primarySpan.name.replace(/\./g, '_')}` : null;
+    const primarySpanAttrs = primarySpan
+      ? Object.keys(primarySpan.attributes).slice(0, 3).map(k => `${k}: ''`).join(', ')
+      : '';
+
+    const homeImportLine = primarySpanFn
+      ? `import { ${primarySpanFn} } from '@/lib/instrumentation';`
+      : '';
+
+    const homeLoadDataBody = primarySpanFn
+      ? `const result = await ${primarySpanFn}(async () => {
+        const response = await fetch(\`\${API_URL}/api/${pageConfig.apiEndpoint}\`);
+        if (!response.ok) throw new Error('Failed to load data');
+        return response.json();
+      }, { ${primarySpanAttrs} });
+      setData(result.${pageConfig.dataKey} || result || []);`
+      : `const response = await fetch(\`\${API_URL}/api/${pageConfig.apiEndpoint}\`);
+      if (!response.ok) throw new Error('Failed to load data');
+      const result = await response.json();
+      setData(result.${pageConfig.dataKey} || result || []);`;
+
     // Home page that fetches from backend API
     const homePage = `'use client';
 import * as Sentry from '@sentry/nextjs';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
+${homeImportLine}
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
@@ -1119,15 +1146,7 @@ export default function Home() {
   const loadData = async () => {
     setLoading(true);
     try {
-      await Sentry.startSpan(
-        { op: 'http.client', name: '${pageConfig.loadDataSpanName}' },
-        async () => {
-          const response = await fetch(\`\${API_URL}/api/${pageConfig.apiEndpoint}\`);
-          if (!response.ok) throw new Error('Failed to load data');
-          const result = await response.json();
-          setData(result.${pageConfig.dataKey} || result || []);
-        }
-      );
+      ${homeLoadDataBody}
     } catch (err) {
       console.error('Error loading data:', err);
       Sentry.captureException(err);
@@ -1200,18 +1219,14 @@ export default function DataPage() {
 
   const loadData = async () => {
     try {
-      await Sentry.startSpan(
-        { op: 'http.client', name: '${secondaryConfig.loadSpanName}' },
-        async () => {
-          const response = await fetch(\`\${API_URL}/api/${secondaryConfig.endpoint}\`);
-          if (response.ok) {
-            const result = await response.json();
-            setData(result.${secondaryConfig.dataKey} || result || []);
-          } else {
-            setData(${JSON.stringify(secondaryConfig.fallbackData)});
-          }
-        }
-      );
+      // Do NOT wrap fetch() in a manual startSpan({ op: 'http.client' }) — SDK auto-instruments fetch.
+      const response = await fetch(\`\${API_URL}/api/${secondaryConfig.endpoint}\`);
+      if (response.ok) {
+        const result = await response.json();
+        setData(result.${secondaryConfig.dataKey} || result || []);
+      } else {
+        setData(${JSON.stringify(secondaryConfig.fallbackData)});
+      }
     } catch (err) {
       Sentry.captureException(err);
       setData(${JSON.stringify(secondaryConfig.fallbackData)});
@@ -1904,6 +1919,23 @@ PORT=3001
       // These are valid OTel semantic convention attribute names but invalid as unquoted JS keys.
       code = code.replace(/([{,]\s*)([a-zA-Z][a-zA-Z0-9]*(?:\.[a-zA-Z][a-zA-Z0-9]*)+)\s*:/g, "$1'$2':");
 
+      // Validate: detect duplicate method+path registrations.
+      // In Express, only the first handler for a given method+path ever fires — duplicates silently discard spans.
+      const routeMatches = [...code.matchAll(/router\.(get|post|put|patch|delete)\s*\(\s*['"`]([^'"`]+)['"`]/gi)];
+      const seen = new Set<string>();
+      const duplicates: string[] = [];
+      for (const m of routeMatches) {
+        const key = `${m[1].toUpperCase()} ${m[2]}`;
+        if (seen.has(key)) duplicates.push(key);
+        else seen.add(key);
+      }
+      if (duplicates.length > 0) {
+        console.warn(`⚠️  LLM generated duplicate route handlers (only first fires): ${duplicates.join(', ')}`);
+        console.warn('⚠️  Falling back to template routes to guarantee every span gets its own route...');
+        this.generateBackendRoutes(backendPath, project);
+        return;
+      }
+
       // Write routes file
       fs.writeFileSync(path.join(backendPath, 'src', 'routes', 'api.ts'), code);
 
@@ -1924,10 +1956,18 @@ PORT=3001
       ? `const { ${spanFnNames.join(', ')} } = require('../utils/instrumentation');`
       : `// No backend spans defined — add instrumentation below`;
 
-    // Generate one route per backend span
+    // Generate one route per backend span — derive unique path from span.name (not span.op)
+    // to guarantee each span gets its own route regardless of how many spans share the same op.
     const spanRoutes = backendSpans.map(span => {
       const fnName = `trace_${span.name.replace(/\./g, '_')}`;
-      const routePath = `/${span.op.toLowerCase().replace(/[^a-z0-9]/g, '-')}`;
+      // Use span.name to build a unique, hierarchical route path, e.g.:
+      //   product.fetch_details → /product/fetch-details
+      //   checkout.init         → /checkout/init
+      // This matches the derivation in the LLM prompts so FE and BE always agree.
+      const nameParts = span.name.split('.');
+      const routePath = nameParts.length === 1
+        ? `/${nameParts[0].replace(/_/g, '-')}`
+        : `/${nameParts[0]}/${nameParts.slice(1).join('/').replace(/_/g, '-')}`;
       const attrEntries = Object.keys(span.attributes)
         .map(k => {
           // Quote keys with dots (OTel conventions like 'http.method') — unquoted are JS syntax errors
@@ -1936,7 +1976,11 @@ PORT=3001
         })
         .join(',\n');
       const attrObj = attrEntries ? `{\n${attrEntries}\n    }` : '{}';
-      const isGet = ['load', 'fetch', 'get', 'list', 'read', 'query', 'search'].some(v => span.op.toLowerCase().includes(v));
+      // Use span.name (not span.op) to determine HTTP method — op values like 'operation' or 'product'
+      // give no signal, but the action part of the name (fetch, load, search, filter, get) does.
+      const isGet = ['fetch', 'load', 'get', 'list', 'read', 'query', 'search', 'filter', 'view', 'show', 'detail'].some(
+        v => span.name.toLowerCase().includes(v)
+      );
       const method = isGet ? 'get' : 'post';
 
       return `

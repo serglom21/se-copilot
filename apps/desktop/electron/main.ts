@@ -124,6 +124,13 @@ function setupIpcHandlers() {
   });
 
   ipcMain.handle('projects:delete', async (_, projectId: string) => {
+    // Kill any zombie server processes running from the project's output directory
+    const outputPath = storage.resolveOutputPath(projectId);
+    if (outputPath) {
+      await liveDataGeneratorService.killProcessesInDirectory(outputPath);
+    }
+    // Delete output folder on disk, then the project spec
+    storage.deleteProjectOutput(projectId);
     return storage.deleteProject(projectId);
   });
 
@@ -228,6 +235,14 @@ function setupIpcHandlers() {
 
   ipcMain.handle('sentry:list-dashboards', async () => {
     return sentryAPIService.listDashboards();
+  });
+
+  ipcMain.handle('sentry:list-recent-trace-ids', async (_, projectSlug?: string) => {
+    return sentryAPIService.listRecentTraceIds(projectSlug);
+  });
+
+  ipcMain.handle('sentry:fetch-trace-spans', async (_, traceIds: string[]) => {
+    return sentryAPIService.fetchTraceSpans(traceIds);
   });
 
   // File system

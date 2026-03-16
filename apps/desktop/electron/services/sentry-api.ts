@@ -279,6 +279,99 @@ export class SentryAPIService {
     return '';
   }
 
+  async listRecentTraceIds(projectSlug?: string): Promise<{ success: boolean; traceIds?: string[]; error?: string }> {
+    try {
+      const settings = this.storage.getSettings();
+      if (!settings.sentry.authToken || !settings.sentry.organization) {
+        throw new Error('Sentry credentials not configured');
+      }
+
+      const org = settings.sentry.organization.trim();
+      const token = settings.sentry.authToken.trim();
+      const apiBase = getSentryApiBase(org);
+
+      const projectFilter = projectSlug ? `&project=${projectSlug}` : '';
+      const url = `${apiBase}/organizations/${org}/events/?dataset=transactions&field=trace,id,transaction,timestamp&query=is_transaction:true&sort=-timestamp&limit=25${projectFilter}`;
+
+      const response = await fetch(url, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch traces: ${response.status}`);
+      }
+
+      const data = await response.json();
+      const events: any[] = data.data || [];
+      // Deduplicate trace IDs
+      const seen = new Set<string>();
+      const traceIds: string[] = [];
+      for (const event of events) {
+        const tid = event.trace || event['trace'];
+        if (tid && !seen.has(tid)) {
+          seen.add(tid);
+          traceIds.push(tid);
+        }
+      }
+
+      return { success: true, traceIds };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  async fetchTraceSpans(traceIds: string[]): Promise<{ success: boolean; spans?: any[]; error?: string }> {
+    try {
+      const settings = this.storage.getSettings();
+      if (!settings.sentry.authToken || !settings.sentry.organization) {
+        throw new Error('Sentry credentials not configured');
+      }
+
+      const org = settings.sentry.organization.trim();
+      const token = settings.sentry.authToken.trim();
+      const apiBase = getSentryApiBase(org);
+
+      const fields = [
+        'trace_id', 'span_id', 'parent_span_id', 'op', 'description',
+        'start_timestamp', 'timestamp', 'status', 'data', 'sampled', 'transaction'
+      ].join(',');
+
+      const allSpans: any[] = [];
+
+      for (const traceId of traceIds) {
+        const url = `${apiBase}/organizations/${org}/events/?dataset=spansIndexed&field=${encodeURIComponent(fields)}&query=trace:${traceId}&limit=100`;
+        const response = await fetch(url, {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          }
+        });
+
+        if (!response.ok) {
+          console.warn(`[fetchTraceSpans] Failed to fetch trace ${traceId}: ${response.status}`);
+          continue;
+        }
+
+        const data = await response.json();
+        const spans: any[] = data.data || [];
+        allSpans.push(...spans);
+      }
+
+      return { success: true, spans: allSpans };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
   async listDashboards(): Promise<{ success: boolean; dashboards?: any[]; error?: string }> {
     try {
       const settings = this.storage.getSettings();

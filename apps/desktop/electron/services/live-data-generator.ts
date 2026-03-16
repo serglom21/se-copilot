@@ -1,4 +1,4 @@
-import { spawn, ChildProcess, exec } from 'child_process';
+import { spawn, ChildProcess, exec, execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import puppeteer, { Browser, Page } from 'puppeteer';
@@ -222,7 +222,10 @@ PORT=${this.BACKEND_PORT}
     onError: (error: string) => void
   ): Promise<void> {
     const isPythonBackend = project.stack.backend === 'flask' || project.stack.backend === 'fastapi';
-    
+
+    // Kill anything already on the backend port before binding
+    await this.killPort(this.BACKEND_PORT);
+
     return new Promise((resolve, reject) => {
       let command: string;
       let args: string[];
@@ -243,44 +246,38 @@ PORT=${this.BACKEND_PORT}
         args = ['run', 'dev'];
       }
 
+      // Use shell:false + detached so we can kill the entire process group
       this.backendProcess = spawn(command, args, {
         cwd,
         env: { ...process.env, PORT: String(this.BACKEND_PORT) },
-        shell: true
+        shell: false,
+        detached: false,
       });
 
       let started = false;
 
-      this.backendProcess.stdout?.on('data', (data) => {
-        const output = data.toString().toLowerCase();
+      const checkStarted = (data: string) => {
+        const output = data.toLowerCase();
+        if (output.includes('eaddrinuse')) {
+          if (!started) { started = true; reject(new Error(`Port ${this.BACKEND_PORT} still in use`)); }
+          return;
+        }
         if (!started && (output.includes('listening') || output.includes('running') || output.includes('uvicorn') || output.includes('started'))) {
           started = true;
           resolve();
         }
-      });
+      };
 
-      this.backendProcess.stderr?.on('data', (data) => {
-        const output = data.toString().toLowerCase();
-        // Some frameworks output to stderr for info messages
-        if (output.includes('listening') || output.includes('running') || output.includes('uvicorn') || output.includes('started')) {
-          if (!started) {
-            started = true;
-            resolve();
-          }
-        }
-      });
+      this.backendProcess.stdout?.on('data', (d) => checkStarted(d.toString()));
+      this.backendProcess.stderr?.on('data', (d) => checkStarted(d.toString()));
 
       this.backendProcess.on('error', (error) => {
-        reject(new Error(`Failed to start backend: ${error.message}`));
+        if (!started) { started = true; reject(new Error(`Failed to start backend: ${error.message}`)); }
       });
 
       // Timeout after 30 seconds
       setTimeout(() => {
-        if (!started) {
-          started = true;
-          // Assume it's running even without explicit message
-          resolve();
-        }
+        if (!started) { started = true; resolve(); }
       }, 30000);
     });
   }
@@ -293,42 +290,41 @@ PORT=${this.BACKEND_PORT}
   ): Promise<void> {
     const frontendPath = path.join(appPath, 'frontend');
 
+    // Kill anything already on the frontend port before binding
+    await this.killPort(this.FRONTEND_PORT);
+
     return new Promise((resolve, reject) => {
       this.frontendProcess = spawn('npm', ['run', 'dev'], {
         cwd: frontendPath,
         env: { ...process.env, PORT: String(this.FRONTEND_PORT) },
-        shell: true
+        shell: false,
+        detached: false,
       });
 
       let started = false;
 
-      this.frontendProcess.stdout?.on('data', (data) => {
-        const output = data.toString();
+      const checkStarted = (data: string) => {
+        const output = data;
+        if (output.toLowerCase().includes('eaddrinuse')) {
+          if (!started) { started = true; reject(new Error(`Port ${this.FRONTEND_PORT} still in use`)); }
+          return;
+        }
         if (!started && (output.includes('Ready') || output.includes('localhost') || output.includes('started'))) {
           started = true;
           resolve();
         }
-      });
+      };
 
-      this.frontendProcess.stderr?.on('data', (data) => {
-        // Next.js outputs some info to stderr
-        const output = data.toString();
-        if (!started && (output.includes('Ready') || output.includes('localhost'))) {
-          started = true;
-          resolve();
-        }
-      });
+      this.frontendProcess.stdout?.on('data', (d) => checkStarted(d.toString()));
+      this.frontendProcess.stderr?.on('data', (d) => checkStarted(d.toString()));
 
       this.frontendProcess.on('error', (error) => {
-        reject(new Error(`Failed to start frontend: ${error.message}`));
+        if (!started) { started = true; reject(new Error(`Failed to start frontend: ${error.message}`)); }
       });
 
       // Timeout after 60 seconds (Next.js can take a while to compile)
       setTimeout(() => {
-        if (!started) {
-          started = true;
-          resolve();
-        }
+        if (!started) { started = true; resolve(); }
       }, 60000);
     });
   }
@@ -850,23 +846,47 @@ PORT=${this.BACKEND_PORT}
       onOutput('   ✓ Browser closed\n');
     }
 
-    // Stop frontend
-    if (this.frontendProcess) {
-      this.frontendProcess.kill('SIGTERM');
-      this.frontendProcess = null;
-      onOutput('   ✓ Frontend stopped\n');
-    }
+    // Kill by port — reliable even when the child is a grandchild of a shell wrapper
+    await this.killPort(this.FRONTEND_PORT);
+    this.frontendProcess = null;
+    onOutput('   ✓ Frontend stopped\n');
 
-    // Stop backend
-    if (this.backendProcess) {
-      this.backendProcess.kill('SIGTERM');
-      this.backendProcess = null;
-      onOutput('   ✓ Backend stopped\n');
-    }
+    await this.killPort(this.BACKEND_PORT);
+    this.backendProcess = null;
+    onOutput('   ✓ Backend stopped\n');
   }
 
   async stop(): Promise<void> {
     await this.cleanup(() => {});
     this.isRunning = false;
+  }
+
+  /**
+   * Kill any process listening on the given TCP port.
+   * Waits 300ms after sending SIGKILL so the port is fully released before returning.
+   */
+  async killPort(port: number): Promise<void> {
+    return new Promise(resolve => {
+      exec(`lsof -ti tcp:${port}`, (err, stdout) => {
+        const pids = (stdout || '').trim().split('\n').filter(Boolean);
+        if (pids.length === 0) { resolve(); return; }
+        exec(`kill -9 ${pids.join(' ')}`, () => setTimeout(resolve, 300));
+      });
+    });
+  }
+
+  /**
+   * Kill all processes that have files open inside the given directory
+   * (covers zombie servers whose CWD is inside that directory).
+   */
+  async killProcessesInDirectory(dirPath: string): Promise<void> {
+    return new Promise(resolve => {
+      if (!fs.existsSync(dirPath)) { resolve(); return; }
+      exec(`lsof +D "${dirPath}" -t 2>/dev/null`, (err, stdout) => {
+        const pids = [...new Set((stdout || '').trim().split('\n').filter(Boolean))];
+        if (pids.length === 0) { resolve(); return; }
+        exec(`kill -9 ${pids.join(' ')}`, () => setTimeout(resolve, 300));
+      });
+    });
   }
 }
