@@ -15,6 +15,7 @@ import { LiveDataGeneratorService } from './services/live-data-generator';
 import { DeploymentService } from './services/deployment';
 import { ExpoDeployService } from './services/expo-deploy';
 import { SentryAPIService } from './services/sentry-api';
+import { SentryAuthService } from './services/sentry-auth';
 import { ExportService } from './services/export';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -38,6 +39,7 @@ let liveDataGeneratorService: LiveDataGeneratorService;
 let deploymentService: DeploymentService;
 let expoDeployService: ExpoDeployService;
 let sentryAPIService: SentryAPIService;
+let sentryAuthService: SentryAuthService;
 let exportService: ExportService;
 
 function createWindow() {
@@ -74,6 +76,7 @@ app.whenReady().then(async () => {
   githubService = new GitHubService(storage);
   dataRunnerService = new DataRunnerService(storage);
   sentryAPIService = new SentryAPIService(storage);
+  sentryAuthService = new SentryAuthService(storage);
   liveDataGeneratorService = new LiveDataGeneratorService(storage, llmService, sentryAPIService);
   deploymentService = new DeploymentService(storage);
   expoDeployService = new ExpoDeployService(storage);
@@ -243,6 +246,31 @@ function setupIpcHandlers() {
 
   ipcMain.handle('sentry:fetch-trace-spans', async (_, traceIds: string[]) => {
     return sentryAPIService.fetchTraceSpans(traceIds);
+  });
+
+  // Sentry OAuth
+  ipcMain.handle('sentry:start-oauth', async () => {
+    return sentryAuthService.startOAuthFlow();
+  });
+
+  ipcMain.handle('sentry:get-oauth-status', async () => {
+    return sentryAuthService.getAuthStatus();
+  });
+
+  ipcMain.handle('sentry:list-orgs', async () => {
+    return sentryAuthService.listOrganizations();
+  });
+
+  ipcMain.handle('sentry:list-projects', async (_, orgSlug: string) => {
+    return sentryAuthService.listProjects(orgSlug);
+  });
+
+  ipcMain.handle('sentry:get-project-dsn', async (_, orgSlug: string, projectSlug: string) => {
+    return sentryAuthService.getProjectDsn(orgSlug, projectSlug);
+  });
+
+  ipcMain.handle('sentry:oauth-logout', async () => {
+    return sentryAuthService.logout();
   });
 
   // File system

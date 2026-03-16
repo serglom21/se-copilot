@@ -122,6 +122,22 @@ export const SettingsSchema = z.object({
     authToken: z.string().optional(),
     organization: z.string().optional(),
     project: z.string().optional()
+  }).default({}),
+  sentryAuth: z.object({
+    accessToken: z.string().optional(),
+    refreshToken: z.string().optional(),
+    user: z.object({
+      name: z.string(),
+      email: z.string()
+    }).optional(),
+    orgs: z.array(z.object({
+      slug: z.string(),
+      name: z.string()
+    })).default([])
+  }).default({}),
+  sentryOAuth: z.object({
+    clientId: z.string().optional(),
+    clientSecret: z.string().optional()
   }).default({})
 });
 

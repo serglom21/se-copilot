@@ -37,6 +37,14 @@ export interface IElectronAPI {
   listRecentSentryTraceIds: (projectSlug?: string) => Promise<{ success: boolean; traceIds?: string[]; error?: string }>;
   fetchSentryTraceSpans: (traceIds: string[]) => Promise<{ success: boolean; spans?: any[]; error?: string }>;
 
+  // Sentry OAuth
+  startSentryOAuth: () => Promise<{ success: boolean; error?: string }>;
+  getSentryOAuthStatus: () => Promise<{ authenticated: boolean; user?: { name: string; email: string }; orgs?: Array<{ slug: string; name: string }> }>;
+  listSentryOrgs: () => Promise<Array<{ slug: string; name: string }>>;
+  listSentryProjects: (orgSlug: string) => Promise<Array<{ slug: string; name: string; platform?: string }>>;
+  getSentryProjectDsn: (orgSlug: string, projectSlug: string) => Promise<{ publicDsn: string } | null>;
+  logoutSentry: () => Promise<void>;
+
   // File system
   getOutputPath: (projectId: string) => Promise<string>;
   readFile: (filePath: string) => Promise<string>;
@@ -119,6 +127,14 @@ const electronAPI: IElectronAPI = {
   listSentryDashboards: () => ipcRenderer.invoke('sentry:list-dashboards'),
   listRecentSentryTraceIds: (projectSlug) => ipcRenderer.invoke('sentry:list-recent-trace-ids', projectSlug),
   fetchSentryTraceSpans: (traceIds) => ipcRenderer.invoke('sentry:fetch-trace-spans', traceIds),
+
+  // Sentry OAuth
+  startSentryOAuth: () => ipcRenderer.invoke('sentry:start-oauth'),
+  getSentryOAuthStatus: () => ipcRenderer.invoke('sentry:get-oauth-status'),
+  listSentryOrgs: () => ipcRenderer.invoke('sentry:list-orgs'),
+  listSentryProjects: (orgSlug) => ipcRenderer.invoke('sentry:list-projects', orgSlug),
+  getSentryProjectDsn: (orgSlug, projectSlug) => ipcRenderer.invoke('sentry:get-project-dsn', orgSlug, projectSlug),
+  logoutSentry: () => ipcRenderer.invoke('sentry:oauth-logout'),
 
   // File system
   getOutputPath: (projectId) => ipcRenderer.invoke('fs:get-output-path', projectId),

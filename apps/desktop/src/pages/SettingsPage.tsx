@@ -1,19 +1,31 @@
 import { useState, useEffect } from 'react';
 import * as Sentry from '@sentry/react';
-import { Bot, Github, Telescope, FlaskConical, CheckCircle2 } from 'lucide-react';
+import { Bot, Github, Telescope, FlaskConical, CheckCircle2, ChevronDown, ChevronRight, ExternalLink, LogOut, RefreshCw } from 'lucide-react';
 import Button from '../components/Button';
 import { Input } from '../components/Input';
 import { toast } from '../store/toast-store';
 
 export default function SettingsPage() {
-  const [settings, setSettings] = useState({
+  const [settings, setSettings] = useState<any>({
     llm: { baseUrl: '', apiKey: '', model: 'gpt-4-turbo-preview' },
     github: { accessToken: '', username: '' },
     sentry: { authToken: '', organization: '', project: '' },
+    sentryOAuth: { clientId: '', clientSecret: '' },
   });
   const [loading, setLoading] = useState(true);
+  const [sentryAuth, setSentryAuth] = useState<{
+    authenticated: boolean;
+    user?: { name: string; email: string };
+    orgs?: Array<{ slug: string; name: string }>;
+  }>({ authenticated: false });
+  const [oauthConnecting, setOauthConnecting] = useState(false);
+  const [showManualToken, setShowManualToken] = useState(false);
+  const [showOAuthSetup, setShowOAuthSetup] = useState(false);
 
-  useEffect(() => { loadSettings(); }, []);
+  useEffect(() => {
+    loadSettings();
+    loadSentryAuthStatus();
+  }, []);
 
   const loadSettings = async () => {
     const data = await window.electronAPI.getSettings();
@@ -21,19 +33,57 @@ export default function SettingsPage() {
     setLoading(false);
   };
 
+  const loadSentryAuthStatus = async () => {
+    const status = await window.electronAPI.getSentryOAuthStatus();
+    setSentryAuth(status);
+  };
+
   const handleSave = async () => {
     try {
       await window.electronAPI.updateSettings(settings);
-      if (settings.github.accessToken && !settings.github.username) {
-        try {
-          await window.electronAPI.pollGitHubAuth('manual');
-          await loadSettings();
-        } catch {}
-      }
       toast.success('Settings saved');
     } catch (error) {
       toast.error('Failed to save settings: ' + error);
     }
+  };
+
+  const handleSentryConnect = async () => {
+    setOauthConnecting(true);
+    try {
+      // Save OAuth credentials first so the service can read them
+      await window.electronAPI.updateSettings(settings);
+      const result = await window.electronAPI.startSentryOAuth();
+      if (result.success) {
+        toast.success('Connected to Sentry!');
+        await loadSentryAuthStatus();
+        await loadSettings();
+      } else {
+        toast.error(result.error || 'OAuth failed');
+        // Show setup panel if credentials are missing
+        if (result.error?.includes('credentials not configured')) {
+          setShowOAuthSetup(true);
+        }
+      }
+    } catch (err) {
+      toast.error('Connection error: ' + err);
+    } finally {
+      setOauthConnecting(false);
+    }
+  };
+
+  const handleSentryDisconnect = async () => {
+    await window.electronAPI.logoutSentry();
+    setSentryAuth({ authenticated: false });
+    toast.info('Disconnected from Sentry');
+  };
+
+  const handleOrgChange = async (orgSlug: string) => {
+    const updated = {
+      ...settings,
+      sentry: { ...settings.sentry, organization: orgSlug }
+    };
+    setSettings(updated);
+    await window.electronAPI.updateSettings(updated);
   };
 
   if (loading) return <div className="p-8 text-white/50 text-sm">Loading…</div>;
@@ -51,20 +101,20 @@ export default function SettingsPage() {
           <Input
             label="API Base URL"
             placeholder="https://api.openai.com/v1"
-            value={settings.llm.baseUrl}
+            value={settings.llm?.baseUrl || ''}
             onChange={e => setSettings({ ...settings, llm: { ...settings.llm, baseUrl: e.target.value } })}
           />
           <Input
             label="API Key"
             type="password"
             placeholder="sk-…"
-            value={settings.llm.apiKey}
+            value={settings.llm?.apiKey || ''}
             onChange={e => setSettings({ ...settings, llm: { ...settings.llm, apiKey: e.target.value } })}
           />
           <Input
             label="Model"
             placeholder="gpt-4-turbo-preview"
-            value={settings.llm.model}
+            value={settings.llm?.model || ''}
             onChange={e => setSettings({ ...settings, llm: { ...settings.llm, model: e.target.value } })}
           />
           <p className="text-xs text-white/35">Any OpenAI-compatible endpoint works (OpenAI, Azure OpenAI, etc.)</p>
@@ -72,7 +122,7 @@ export default function SettingsPage() {
 
         {/* GitHub */}
         <Section icon={<Github size={16} />} title="GitHub Configuration">
-          {settings.github.username ? (
+          {settings.github?.username ? (
             <div className="flex items-center justify-between p-3 rounded-lg bg-green-900/15 border border-green-700/30">
               <div className="flex items-center gap-2 text-sm text-green-300">
                 <CheckCircle2 size={14} className="text-green-400" />
@@ -92,10 +142,10 @@ export default function SettingsPage() {
                 label="Personal Access Token"
                 type="password"
                 placeholder="ghp_…"
-                value={settings.github.accessToken}
+                value={settings.github?.accessToken || ''}
                 onChange={e => setSettings({ ...settings, github: { ...settings.github, accessToken: e.target.value } })}
               />
-              {settings.github.accessToken && (
+              {settings.github?.accessToken && (
                 <Button size="sm" variant="secondary" onClick={async () => {
                   try {
                     const result = await window.electronAPI.pollGitHubAuth('manual');
@@ -107,49 +157,160 @@ export default function SettingsPage() {
                 </Button>
               )}
               <p className="text-xs text-white/35">
-                Create a token at <a href="https://github.com/settings/tokens/new" target="_blank" className="text-sentry-purple-400 hover:underline">github.com/settings/tokens</a> with <code className="bg-white/5 px-1 rounded">repo</code> scope.
+                Create a token at{' '}
+                <a href="https://github.com/settings/tokens/new" target="_blank" rel="noopener noreferrer" className="text-sentry-purple-400 hover:underline">
+                  github.com/settings/tokens
+                </a>{' '}
+                with <code className="bg-white/5 px-1 rounded">repo</code> scope.
               </p>
             </>
           )}
         </Section>
 
         {/* Sentry */}
-        <Section icon={<Telescope size={16} />} title="Sentry API Configuration">
-          <Input
-            label="Auth Token"
-            type="password"
-            placeholder="sntrys_…"
-            value={settings.sentry.authToken}
-            onChange={e => setSettings({ ...settings, sentry: { ...settings.sentry, authToken: e.target.value } })}
-          />
-          <Input
-            label="Organization Slug"
-            placeholder="my-org"
-            value={settings.sentry.organization}
-            onChange={e => setSettings({ ...settings, sentry: { ...settings.sentry, organization: e.target.value } })}
-          />
-          <Input
-            label="Project Slug"
-            placeholder="my-project"
-            value={settings.sentry.project}
-            onChange={e => setSettings({ ...settings, sentry: { ...settings.sentry, project: e.target.value } })}
-          />
-          {settings.sentry.authToken && settings.sentry.organization && (
-            <Button size="sm" variant="secondary" onClick={async () => {
-              try {
-                const result = await window.electronAPI.verifySentryConnection();
-                if (result.success) toast.success(`Connected to organization: ${result.organization}`);
-                else toast.error('Connection failed: ' + result.error);
-              } catch (error) { toast.error('Error: ' + error); }
-            }}>
-              Verify Connection
-            </Button>
+        <Section icon={<Telescope size={16} />} title="Sentry Connection">
+          {sentryAuth.authenticated ? (
+            /* Connected state */
+            <div className="space-y-3">
+              <div className="flex items-center justify-between p-3 rounded-lg bg-green-900/15 border border-green-700/30">
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 size={14} className="text-green-400" />
+                  <div>
+                    <p className="text-sm text-green-300">{sentryAuth.user?.name || 'Connected'}</p>
+                    {sentryAuth.user?.email && (
+                      <p className="text-xs text-white/40">{sentryAuth.user.email}</p>
+                    )}
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <Button size="sm" variant="ghost" onClick={loadSentryAuthStatus}>
+                    <RefreshCw size={13} />
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={handleSentryDisconnect}>
+                    <LogOut size={13} className="mr-1" /> Disconnect
+                  </Button>
+                </div>
+              </div>
+
+              {sentryAuth.orgs && sentryAuth.orgs.length > 0 && (
+                <div>
+                  <label className="block text-xs font-medium text-white/55 mb-1.5">Active Organization</label>
+                  <select
+                    className="w-full bg-sentry-surface border border-sentry-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-sentry-purple-500"
+                    value={settings.sentry?.organization || sentryAuth.orgs[0]?.slug || ''}
+                    onChange={e => handleOrgChange(e.target.value)}
+                  >
+                    {sentryAuth.orgs.map(org => (
+                      <option key={org.slug} value={org.slug}>{org.name}</option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-white/35 mt-1">Dashboards will be pushed to this organization.</p>
+                </div>
+              )}
+            </div>
+          ) : (
+            /* Not connected state */
+            <div className="space-y-4">
+              <Button
+                onClick={handleSentryConnect}
+                disabled={oauthConnecting}
+                className="w-full"
+              >
+                {oauthConnecting ? 'Opening browser…' : 'Connect with Sentry'}
+              </Button>
+
+              {/* OAuth App Setup */}
+              <div className="border border-sentry-border rounded-lg overflow-hidden">
+                <button
+                  className="w-full flex items-center justify-between px-4 py-3 text-sm text-white/70 hover:text-white hover:bg-white/5 transition-colors"
+                  onClick={() => setShowOAuthSetup(v => !v)}
+                >
+                  <span>OAuth App Setup</span>
+                  {showOAuthSetup ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                </button>
+                {showOAuthSetup && (
+                  <div className="px-4 pb-4 space-y-3 border-t border-sentry-border">
+                    <div className="mt-3 p-3 rounded-lg bg-sentry-purple-500/10 border border-sentry-purple-500/20 text-xs text-white/60 space-y-1">
+                      <p className="text-white/80 font-medium">One-time setup required:</p>
+                      <p>1. Go to <a href="https://sentry.io/settings/account/developer-settings/new-public/" target="_blank" rel="noopener noreferrer" className="text-sentry-purple-400 hover:underline inline-flex items-center gap-0.5">Sentry Developer Settings <ExternalLink size={10} /></a></p>
+                      <p>2. Create a <strong>Public Integration</strong> named "SE Copilot"</p>
+                      <p>3. Under Redirect URIs add: <code className="bg-white/10 px-1 rounded">http://localhost:54321/callback</code></p>
+                      <p>4. Enable scopes: <code className="bg-white/10 px-1 rounded">org:read</code> <code className="bg-white/10 px-1 rounded">org:write</code> <code className="bg-white/10 px-1 rounded">project:read</code></p>
+                      <p>5. Copy Client ID and Client Secret below</p>
+                    </div>
+                    <Input
+                      label="Client ID"
+                      placeholder="Your Sentry App client ID"
+                      value={settings.sentryOAuth?.clientId || ''}
+                      onChange={e => setSettings({ ...settings, sentryOAuth: { ...settings.sentryOAuth, clientId: e.target.value } })}
+                    />
+                    <Input
+                      label="Client Secret"
+                      type="password"
+                      placeholder="Your Sentry App client secret"
+                      value={settings.sentryOAuth?.clientSecret || ''}
+                      onChange={e => setSettings({ ...settings, sentryOAuth: { ...settings.sentryOAuth, clientSecret: e.target.value } })}
+                    />
+                    <Button size="sm" variant="secondary" onClick={handleSave}>Save Credentials</Button>
+                  </div>
+                )}
+              </div>
+
+              {/* Manual token fallback */}
+              <div className="border border-sentry-border rounded-lg overflow-hidden">
+                <button
+                  className="w-full flex items-center justify-between px-4 py-3 text-sm text-white/70 hover:text-white hover:bg-white/5 transition-colors"
+                  onClick={() => setShowManualToken(v => !v)}
+                >
+                  <span>Manual token (fallback)</span>
+                  {showManualToken ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                </button>
+                {showManualToken && (
+                  <div className="px-4 pb-4 space-y-3 border-t border-sentry-border">
+                    <div className="mt-3">
+                      <Input
+                        label="Auth Token"
+                        type="password"
+                        placeholder="sntrys_…"
+                        value={settings.sentry?.authToken || ''}
+                        onChange={e => setSettings({ ...settings, sentry: { ...settings.sentry, authToken: e.target.value } })}
+                      />
+                    </div>
+                    <Input
+                      label="Organization Slug"
+                      placeholder="my-org"
+                      value={settings.sentry?.organization || ''}
+                      onChange={e => setSettings({ ...settings, sentry: { ...settings.sentry, organization: e.target.value } })}
+                    />
+                    <Input
+                      label="Project Slug"
+                      placeholder="my-project"
+                      value={settings.sentry?.project || ''}
+                      onChange={e => setSettings({ ...settings, sentry: { ...settings.sentry, project: e.target.value } })}
+                    />
+                    {settings.sentry?.authToken && settings.sentry?.organization && (
+                      <Button size="sm" variant="secondary" onClick={async () => {
+                        try {
+                          const result = await window.electronAPI.verifySentryConnection();
+                          if (result.success) toast.success(`Connected to: ${result.organization}`);
+                          else toast.error('Connection failed: ' + result.error);
+                        } catch (error) { toast.error('Error: ' + error); }
+                      }}>
+                        Verify Connection
+                      </Button>
+                    )}
+                    <p className="text-xs text-white/35">
+                      Create a token at{' '}
+                      <a href="https://sentry.io/settings/account/api/auth-tokens/" target="_blank" rel="noopener noreferrer" className="text-sentry-purple-400 hover:underline">
+                        sentry.io/auth-tokens
+                      </a>{' '}
+                      with <code className="bg-white/5 px-1 rounded">org:read</code> + <code className="bg-white/5 px-1 rounded">project:write</code> scopes.
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
           )}
-          <p className="text-xs text-white/35">
-            Create a token at <a href="https://sentry.io/settings/account/api/auth-tokens/" target="_blank" rel="noopener noreferrer" className="text-sentry-purple-400 hover:underline">sentry.io/auth-tokens</a> with <code className="bg-white/5 px-1 rounded">org:read</code> + <code className="bg-white/5 px-1 rounded">project:write</code> scopes.
-            Your org slug is visible in your Sentry URL.
-          </p>
-          <p className="text-xs text-sentry-purple-400/70">These credentials are pre-filled when uploading dashboards from Home.</p>
         </Section>
 
         {/* Save */}
