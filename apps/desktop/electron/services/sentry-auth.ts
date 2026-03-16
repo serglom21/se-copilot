@@ -1,4 +1,5 @@
 import http from 'http';
+import { exec } from 'child_process';
 import { shell } from 'electron';
 import { StorageService } from './storage';
 
@@ -8,9 +9,20 @@ const OAUTH_SCOPES = 'org:read org:write project:read';
 
 export class SentryAuthService {
   private storage: StorageService;
+  private activeServer: http.Server | null = null;
 
   constructor(storage: StorageService) {
     this.storage = storage;
+  }
+
+  private killPort(): Promise<void> {
+    return new Promise(resolve => {
+      exec(`lsof -ti tcp:${OAUTH_PORT}`, (_, stdout) => {
+        const pids = (stdout || '').trim().split('\n').filter(Boolean);
+        if (pids.length === 0) { resolve(); return; }
+        exec(`kill -9 ${pids.join(' ')}`, () => setTimeout(resolve, 300));
+      });
+    });
   }
 
   async startOAuthFlow(): Promise<{ success: boolean; error?: string }> {
@@ -23,6 +35,13 @@ export class SentryAuthService {
         error: 'Sentry OAuth credentials not found. Ensure SENTRY_CLIENT_ID and SENTRY_CLIENT_SECRET are set in the .env file.'
       };
     }
+
+    // Close any lingering server from a previous attempt
+    if (this.activeServer) {
+      this.activeServer.close();
+      this.activeServer = null;
+    }
+    await this.killPort();
 
     return new Promise((resolve) => {
       const server = http.createServer(async (req, res) => {
