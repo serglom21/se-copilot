@@ -206,6 +206,8 @@ export class SentryAuthService {
     const res = await fetch(`https://sentry.io/api/0/organizations/${orgSlug}/projects/`, {
       headers: { 'Authorization': `Bearer ${token}` }
     });
+    // 404 means the integration isn't installed in this org — return empty rather than throw
+    if (res.status === 404 || res.status === 403) return [];
     if (!res.ok) throw new Error(`Failed to list projects: ${res.status}`);
     const data = await res.json();
     return data.map((p: any) => ({ slug: p.slug, name: p.name, platform: p.platform }));

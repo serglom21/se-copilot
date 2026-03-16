@@ -254,7 +254,24 @@ export default function DataGeneratorPage() {
           <div className="space-y-3">
             <p className="text-xs font-medium text-white/55">Sentry Project</p>
 
-            {sentryAuth.authenticated ? (
+            {sentryAuth.authenticated && (sentryAuth.orgs?.length ?? 0) === 0 ? (
+              /* Authenticated but no orgs stored — stale token, prompt reconnect */
+              <div className="space-y-2">
+                <div className="text-[11px] text-yellow-400/80 bg-yellow-900/15 border border-yellow-700/30 rounded-lg px-3 py-2">
+                  Sentry is connected but org info is missing. Please disconnect and reconnect in Settings.
+                </div>
+                <button
+                  className="text-[11px] text-sentry-purple-400 hover:text-sentry-purple-300"
+                  onClick={async () => {
+                    await window.electronAPI.logoutSentry();
+                    setSentryAuth({ authenticated: false });
+                    setShowManualDsn(true);
+                  }}
+                >
+                  Disconnect and reconnect →
+                </button>
+              </div>
+            ) : sentryAuth.authenticated ? (
               <>
                 {(sentryAuth.orgs?.length ?? 0) > 1 && (
                   <select
@@ -272,7 +289,9 @@ export default function DataGeneratorPage() {
                   {loadingProjects ? (
                     <div className="px-3 py-3 text-xs text-white/30">Loading projects…</div>
                   ) : projects.length === 0 ? (
-                    <div className="px-3 py-3 text-xs text-white/30">No projects in this org</div>
+                    <div className="px-3 py-3 text-xs text-white/30">
+                      No projects found. The Demo Workbench integration may not be installed in this org.
+                    </div>
                   ) : (
                     <div className="max-h-48 overflow-y-auto divide-y divide-sentry-border">
                       {projects.map(project => {
@@ -346,6 +365,7 @@ export default function DataGeneratorPage() {
                 )}
               </>
             ) : (
+              /* Not authenticated */
               <div className="space-y-3">
                 <div className="text-[11px] text-white/35 bg-white/3 border border-sentry-border rounded-lg px-3 py-2">
                   Connect Sentry in Settings to pick a project automatically.
