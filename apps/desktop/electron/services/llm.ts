@@ -1,16 +1,65 @@
 import { StorageService } from './storage';
 import { EngagementSpec, SpanDefinition } from '../../src/types/spec';
+import { RulesBankService } from './rules-bank';
+import * as http from 'http';
 
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
 }
 
+/**
+ * Robustly extract the first complete JSON object from a model response.
+ * Handles: markdown fences, leading/trailing prose, partial fences.
+ * Throws if no valid JSON object is found.
+ */
+function extractJsonObject(raw: string): any {
+  // Strip markdown fences if present
+  let text = raw.replace(/^```(?:json)?\s*/m, '').replace(/```[\s\S]*$/m, '').trim();
+
+  // Find the first '{' and walk forward matching braces to get the full object
+  const start = text.indexOf('{');
+  if (start === -1) throw new SyntaxError('No JSON object found in LLM response');
+
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (escape) { escape = false; continue; }
+    if (ch === '\\' && inString) { escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) {
+        return JSON.parse(text.slice(start, i + 1));
+      }
+    }
+  }
+  // Fallback: try parsing everything from start (handles truncated responses)
+  return JSON.parse(text.slice(start));
+}
+
 export class LLMService {
   private storage: StorageService;
+  private rulesBank: RulesBankService | null = null;
+  streamProgressCallback: ((tokens: number, label: string) => void) | null = null;
 
-  constructor(storage: StorageService) {
+  // Serial queue for local model requests — MLX only handles one request at a time.
+  // Without this, concurrent calls (e.g. page generation + span suggestion) pile up
+  // on the same socket, the second request sees no data, and the inactivity timeout fires.
+  private localQueue: Promise<unknown> = Promise.resolve();
+  private localQueueDepth = 0;
+
+  constructor(storage: StorageService, rulesBank?: RulesBankService) {
     this.storage = storage;
+    this.rulesBank = rulesBank || null;
+  }
+
+  setRulesBank(rulesBank: RulesBankService) {
+    this.rulesBank = rulesBank;
   }
 
   async chat(projectId: string, userMessage: string): Promise<{ 
@@ -45,24 +94,10 @@ export class LLMService {
     const response = await this.callLLM(messages, settings.llm);
     const timestamp = new Date().toISOString();
 
-    // Extract spans from the response
-    const extractedSpans = this.extractSpansFromText(response);
-
-    // Auto-add extracted spans to the project
-    if (extractedSpans.length > 0) {
-      const existingSpanNames = new Set(project.instrumentation.spans.map(s => s.name));
-      const newSpans = extractedSpans.filter(span => !existingSpanNames.has(span.name));
-      
-      if (newSpans.length > 0) {
-        const updatedSpans = [...project.instrumentation.spans, ...newSpans];
-        this.storage.updateProject(projectId, {
-          instrumentation: {
-            ...project.instrumentation,
-            spans: updatedSpans
-          }
-        });
-      }
-    }
+    // Extract spans from the response (user confirms via chips — not auto-added)
+    const existingSpanNames = new Set(project.instrumentation.spans.map(s => s.name));
+    const allExtracted = this.extractSpansFromText(response);
+    const extractedSpans = allExtracted.filter(s => !existingSpanNames.has(s.name));
 
     // Save chat history
     const updatedHistory = [
@@ -81,8 +116,8 @@ export class LLMService {
   private extractSpansFromText(text: string): SpanDefinition[] {
     const spans: SpanDefinition[] = [];
     
-    // Pattern 1: Backtick-wrapped span names (handles multi-part like shipping.address.format)
-    const codeBlockPattern = /`([a-z]+(?:\.[a-zA-Z]+)+)`/g;
+    // Pattern 1: Backtick-wrapped span names (e.g. `signup.form_interaction`)
+    const codeBlockPattern = /`([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+)`/g;
     const matches = text.matchAll(codeBlockPattern);
     
     for (const match of matches) {
@@ -112,19 +147,17 @@ export class LLMService {
     }
     
     // Pattern 2: Explicit span definitions in text
-    const explicitPattern = /span.*?[:`]\s*([a-z]+(?:\.[a-zA-Z]+)+)/gi;
+    const explicitPattern = /span.*?[:`]\s*([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+)/gi;
     const explicitMatches = text.matchAll(explicitPattern);
-    
+
     for (const match of explicitMatches) {
       const spanName = match[1].toLowerCase();
       if (!spanName.includes('.')) continue;
-      
-      // Skip if already added
       if (spans.find(s => s.name === spanName)) continue;
-      
+
       const [op] = spanName.split('.');
       const layer = this.guessLayer(spanName, text);
-      
+
       spans.push({
         name: spanName,
         op: op,
@@ -134,7 +167,30 @@ export class LLMService {
         pii: { keys: [] }
       });
     }
-    
+
+    // Pattern 3: Plain dot-notation names in numbered/bulleted list lines
+    // Matches: "1. signup.form_interaction", "1. `signup.form_interaction`", "- signup.field_validation"
+    const listPattern = /^[\s]*(?:\d+\.|[-*])\s+`?([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+)`?/gm;
+    const listMatches = text.matchAll(listPattern);
+
+    for (const match of listMatches) {
+      const spanName = match[1].toLowerCase();
+      if (!spanName.includes('.')) continue;
+      if (spans.find(s => s.name === spanName)) continue;
+
+      const [op] = spanName.split('.');
+      const layer = this.guessLayer(spanName, text);
+
+      spans.push({
+        name: spanName,
+        op: op,
+        layer: layer,
+        description: this.extractDescription(spanName, text) || `Tracks ${spanName} operation`,
+        attributes: this.extractAttributes(spanName, text),
+        pii: { keys: [] }
+      });
+    }
+
     return spans;
   }
 
@@ -637,15 +693,7 @@ Return ONLY valid JSON.`
     const response = await this.callLLM(messages, settings.llm);
     
     try {
-      // Remove markdown code blocks if present
-      let jsonText = response.trim();
-      if (jsonText.startsWith('```')) {
-        jsonText = jsonText.replace(/^```(?:json)?\n?/, '');
-        jsonText = jsonText.replace(/\n?```[\s\S]*$/, '');
-        jsonText = jsonText.trim();
-      }
-
-      const parsed = JSON.parse(jsonText);
+      const parsed = extractJsonObject(response);
       return Array.isArray(parsed) ? parsed : [];
     } catch (error) {
       console.error('Failed to parse custom features response:', error);
@@ -779,8 +827,12 @@ Focus on practical, domain-specific instrumentation that helps identify real per
     ).join('\n');
 
     const exampleEndpoint = firstSpan ? deriveApiEndpoint(firstSpan.name).slice(1) : 'signup/submit';
+    const generationRules = this.rulesBank?.getRulesForPrompt('generation') || '';
+    const instrumentationRules = this.rulesBank?.getRulesForPrompt('instrumentation') || '';
+    const allFrontendRules = [generationRules, instrumentationRules].filter(Boolean).join('\n');
 
     const prompt = `You are an expert Next.js developer with deep knowledge of Sentry instrumentation. Generate a complete, production-ready web application based on these requirements:
+${allFrontendRules}
 
 **PROJECT DETAILS:**
 - Name: ${project.project.name}
@@ -829,6 +881,10 @@ Match the endpoint path exactly as listed above for each span.
    - Home/main page: filename must be "page.tsx" (placed at the root of the app directory)
    - Sub-pages: use SUBDIRECTORY format — e.g. "signup/page.tsx", "confirm/page.tsx", "checkout/page.tsx"
    - NEVER use the ".page.tsx" suffix pattern (e.g. "signup.page.tsx" is WRONG)
+5. CRITICAL — 'use client' is mandatory: every page uses hooks (useState, useEffect, etc.) so EVERY page MUST start with 'use client'; as its very first line — no exceptions
+6. NEVER import Html, Head, Main, or NextScript from 'next/document' — these are Pages Router only
+7. NEVER import from 'next/router' — always use 'next/navigation'
+8. If you use useSearchParams(), you MUST wrap the component export in a React.Suspense boundary
 
 **CODE STRUCTURE PATTERN (adapt naming to this project — do not copy these names literally):**
 \`\`\`typescript
@@ -881,7 +937,12 @@ Return ONLY valid JSON in this exact format (no markdown). The "code" field must
   ]
 }
 
-CRITICAL: Every "code" value must be a complete, runnable Next.js page component. Do NOT write placeholders like "// complete page code here" or "// rest of code". Write the actual full code.`;
+CRITICAL: Every "code" value must be a complete, runnable Next.js page component. Do NOT write placeholders like "// complete page code here" or "// rest of code". Write the actual full code.
+
+CRITICAL SYNTAX RULE — trace_* calls take TWO arguments and MUST end with ");" not "};"
+WRONG:  await trace_foo(async () => { ... }, { key: val };
+RIGHT:  await trace_foo(async () => { ... }, { key: val });
+The outer function call needs its own closing ")" before the semicolon. Double-check every trace_* call.`;
 
     const messages: ChatMessage[] = [
       { role: 'user', content: prompt }
@@ -1232,8 +1293,11 @@ Return ONLY valid JSON in this exact format (no markdown):
       .map(s => `- ${s.name} (${s.op}): ${s.description}`)
       .join('\n');
 
+    const expressRules = this.rulesBank?.getRulesForPrompt('generation') || '';
+    const expressInstrumentationRules = this.rulesBank?.getRulesForPrompt('instrumentation') || '';
+    const allBackendRules = [expressRules, expressInstrumentationRules].filter(Boolean).join('\n');
     const prompt = `Generate Express.js API routes for the following application with Sentry instrumentation.
-
+${allBackendRules}
 **PROJECT:** ${project.project.name}
 **VERTICAL:** ${project.project.vertical}
 **REQUIREMENTS:** ${project.project.notes || 'Build functional API endpoints that match the custom spans below'}
@@ -1262,6 +1326,8 @@ ${requiredRoutes || '- Derive routes from the backend spans above'}
 - DO NOT generate generic e-commerce routes (products/cart/checkout) unless this is explicitly an e-commerce project
 - Route paths are EXACTLY as specified in REQUIRED ROUTES above — do not rename them or use op-based names
 - CRITICAL: Span attribute keys with dots MUST be quoted strings. CORRECT: \`{ 'http.method': value }\`. WRONG: \`{ http.method: value }\` — this is a JavaScript SyntaxError
+- CRITICAL: Every route MUST wrap its handler in \`Sentry.continueTrace({ sentryTrace: req.headers['sentry-trace'], baggage: req.headers['baggage'] }, async () => { ... })\` — this ensures the backend span is attached to the frontend trace, not orphaned
+- CRITICAL: The instrumentation functions set \`success: true\` on success and \`success: false\` on error automatically. Do NOT use \`has:error\` — dashboard filters use \`success:false\` instead
 
 **CODE PATTERN:**
 \`\`\`javascript
@@ -1272,15 +1338,20 @@ const { ${allSpanImports || 'trace_main_operation'} } = require('../utils/instru
 
 // Each span gets its OWN route — never collapse multiple spans onto the same path
 router.get('${exampleRoute}', async (req, res) => {
-  try {
-    await ${exampleTraceFn}(async () => {
-      await new Promise(resolve => setTimeout(resolve, Math.random() * 300 + 100));
-    }, { ${exampleAttr} });
-    res.json({ success: true });
-  } catch (error) {
-    Sentry.captureException(error);
-    res.status(500).json({ error: 'Operation failed' });
-  }
+  return Sentry.continueTrace(
+    { sentryTrace: req.headers['sentry-trace'], baggage: req.headers['baggage'] },
+    async () => {
+      try {
+        await ${exampleTraceFn}(async () => {
+          await new Promise(resolve => setTimeout(resolve, Math.random() * 300 + 100));
+        }, { ${exampleAttr} });
+        res.json({ success: true });
+      } catch (error) {
+        Sentry.captureException(error);
+        res.status(500).json({ error: 'Operation failed' });
+      }
+    }
+  );
 });
 
 module.exports = router;
@@ -1928,12 +1999,7 @@ Requirements:
 
     const response = await this.callLLM(messages, settings.llm);
 
-    let cleaned = response.trim();
-    if (cleaned.startsWith('```')) {
-      cleaned = cleaned.replace(/^```(?:json)?\n?/, '').replace(/\n?```[\s\S]*$/, '');
-    }
-
-    const parsed = JSON.parse(cleaned);
+    const parsed = extractJsonObject(response);
 
     const GENERIC_OPS = new Set(['operation', 'operation_type', 'custom', 'span', 'generic', '']);
     const spans: SpanDefinition[] = (parsed.spans || []).map((s: any) => {
@@ -1988,8 +2054,10 @@ Requirements:
     const uniqueOps = [...new Set(spans.map(s => s.op))];
     const opsLine = uniqueOps.join(' | ');
 
+    const dashboardRules = this.rulesBank?.getRulesForPrompt('dashboard') || '';
     const prompt = `You are a Sentry observability expert. Generate 8–12 dashboard widgets for the project below.
 Use ONLY the vocabulary provided — any deviation will break the dashboard.
+${dashboardRules}
 
 PROJECT
   Name: ${name}
@@ -2022,9 +2090,13 @@ VALID CONDITIONS syntax (combine with spaces)
   span.op:<value>          — use an exact op from the list above
   span.description:<value> — use an exact span name from the span list above
   is_transaction:1         — pageload / navigation spans only
-  has:error                — spans that recorded an error
-  !has:error               — spans without errors
+  success:false            — spans that recorded an error (custom attribute set by instrumentation)
+  success:true             — spans that completed successfully
   ""                       — empty string = no filter (all spans)
+
+CRITICAL FILTER RULES:
+- NEVER use has:error or !has:error — these do NOT work for span widgets in Sentry. Use success:false / success:true instead
+- NEVER filter on a custom attribute that is not listed in the span's "Attributes" list above. Every condition must match data the reference app actually generates. Using an attribute not in the list will result in an empty widget.
 
 VALID displayType:  big_number | area | line | table
 VALID widgetType:   spans | error-events
@@ -2206,6 +2278,53 @@ area/line widget:
   }
 
   /**
+   * Generate realistic mock response bodies for template-generated route stubs.
+   * This is the only LLM task for backend routes — structure is always from the template.
+   * Small, focused prompt that any model can handle reliably.
+   */
+  async generateRouteStubs(
+    project: EngagementSpec
+  ): Promise<Array<{ spanName: string; mockResponse: Record<string, any> }>> {
+    const settings = this.storage.getSettings();
+    if (!settings.llm.apiKey || !settings.llm.baseUrl) return [];
+
+    const spans = project.instrumentation.spans;
+    if (spans.length === 0) return [];
+
+    const spanList = spans.map(s => `- ${s.name} (op: ${s.op}): ${s.description || s.name}`).join('\n');
+
+    const prompt = `You are generating mock API response data for a ${project.project.vertical} application called "${project.project.name}".
+
+For each API endpoint below, return a realistic JSON mock response object that matches the domain.
+Keep responses small (2-5 fields). Use realistic field names and values for ${project.project.vertical}.
+
+ENDPOINTS:
+${spanList}
+
+Return ONLY a JSON array, no explanation:
+[
+  { "spanName": "product.list_fetch", "mockResponse": { "products": [...], "total": 10 } },
+  ...
+]`;
+
+    try {
+      const raw = await this.callLLM([{ role: 'user', content: prompt }], {
+        ...settings.llm,
+        temperature: 0.4,
+        timeoutMs: 60_000,
+      });
+      const json = this.extractJsonFromResponse(raw);
+      const parsed = JSON.parse(json);
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter((r: any) =>
+        typeof r.spanName === 'string' && r.mockResponse && typeof r.mockResponse === 'object'
+      );
+    } catch {
+      return [];
+    }
+  }
+
+  /**
    * Generate intelligent user flows for Puppeteer, with code-grounded prompting
    * and a reflection loop to catch coverage gaps.
    */
@@ -2265,8 +2384,9 @@ area/line widget:
   Widget seed values: ${Object.keys(se.seedValues).length > 0 ? JSON.stringify(se.seedValues) : '(none)'}`
     ).join('\n');
 
+    const puppeteerRules = this.rulesBank?.getRulesForPrompt('flows') || '';
     const prompt = `You are a Puppeteer automation expert generating user flows to trigger Sentry custom spans.
-
+${puppeteerRules}
 PROJECT: ${project.project.name} (${project.project.vertical})
 STACK: ${project.stack.type}
 BASE URL: ${frontendBase}
@@ -2385,29 +2505,405 @@ Return ONLY a valid JSON array of flows. No markdown.`;
     return flows;
   }
 
-  private async callLLM(messages: ChatMessage[], config: { baseUrl?: string; apiKey?: string; model?: string }): Promise<string> {
-    const { baseUrl, apiKey, model = 'gpt-4-turbo-preview' } = config;
+  /**
+   * Agent 1: Route Coherence Validator.
+   * For every api_call step, verify url maps to a registered backend route and that
+   * description (when set) matches the url. Returns corrected flows.
+   */
+  async validateFlowRouteCoherence(flows: any[], backendRoutesCode: string): Promise<any[]> {
+    const settings = this.storage.getSettings();
+    if (!settings.llm.apiKey || !settings.llm.baseUrl) return flows;
 
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        model,
-        messages,
-        temperature: 0.7,
-        max_tokens: 4000  // Increased for larger code generation
-      })
-    });
+    const prompt = `You are a route coherence validator for Puppeteer test flows.
 
-    if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`LLM API error: ${response.status} ${error}`);
+TASK: For every api_call step in the flows below:
+1. Verify the "url" field maps to an actual route registered in the backend code.
+2. If "description" is set, verify it accurately describes the url endpoint — fix if mismatched.
+3. Fix any url that does not match a real registered route (use the closest matching route).
+4. Do NOT add or remove flows. Do NOT change non-api_call steps.
+
+BACKEND ROUTES:
+\`\`\`
+${backendRoutesCode.substring(0, 3000)}
+\`\`\`
+
+FLOWS (JSON):
+${JSON.stringify(flows, null, 2).substring(0, 4000)}
+
+Return ONLY the corrected flows as a valid JSON array. No markdown, no explanation.`;
+
+    try {
+      const raw = await this.callLLM([{ role: 'user', content: prompt }], settings.llm);
+      const corrected = JSON.parse(this.extractJsonFromResponse(raw));
+      if (Array.isArray(corrected)) return corrected;
+    } catch (err) {
+      console.warn('[validateFlowRouteCoherence] Failed (non-fatal):', err);
+    }
+    return flows;
+  }
+
+  /**
+   * Agent 2: Duplicate Span Eliminator.
+   * Identifies api_call steps that duplicate what the page already fetches natively.
+   * Returns deduplicated flows.
+   */
+  async eliminateDuplicateSpanFlows(flows: any[], frontendPages: string[]): Promise<any[]> {
+    const settings = this.storage.getSettings();
+    if (!settings.llm.apiKey || !settings.llm.baseUrl) return flows;
+
+    const prompt = `You are a span deduplication expert for Puppeteer test flows.
+
+TASK: Identify api_call steps that are redundant because the page already triggers those
+backend calls naturally during render (navigate → page loads → page fetches data).
+Remove such redundant api_call steps. Keep api_call steps that trigger operations
+not naturally triggered by page navigation (e.g. form submissions, mutations).
+Do NOT add or remove flows. Do NOT change navigate/wait/scroll/click steps.
+
+FRONTEND PAGES (routes that exist):
+${frontendPages.join(', ') || '/'}
+
+FLOWS (JSON):
+${JSON.stringify(flows, null, 2).substring(0, 4000)}
+
+Return ONLY the deduplicated flows as a valid JSON array. No markdown, no explanation.`;
+
+    try {
+      const raw = await this.callLLM([{ role: 'user', content: prompt }], settings.llm);
+      const deduped = JSON.parse(this.extractJsonFromResponse(raw));
+      if (Array.isArray(deduped)) return deduped;
+    } catch (err) {
+      console.warn('[eliminateDuplicateSpanFlows] Failed (non-fatal):', err);
+    }
+    return flows;
+  }
+
+  /**
+   * Agent 3: Span Topology Validator.
+   * Verifies every spec span is exercised by exactly one flow and each flow
+   * navigates to the correct frontend page for that span's context.
+   */
+  async validateFlowSpanTopology(flows: any[], project: EngagementSpec): Promise<any[]> {
+    const settings = this.storage.getSettings();
+    if (!settings.llm.apiKey || !settings.llm.baseUrl) return flows;
+
+    const spanList = project.instrumentation.spans.map(s =>
+      `- ${s.name} (${s.layer}, op: ${s.op})`
+    ).join('\n');
+
+    const prompt = `You are a span topology validator for Puppeteer test flows.
+
+TASK:
+1. Verify every spec span below is exercised by at least one flow.
+2. Verify each flow's navigate step goes to the correct frontend page for that span's domain
+   (e.g. products.* spans → /products, checkout.* spans → /checkout, auth.* → /login).
+3. Fix navigate urls that point to wrong pages for the span being tested.
+4. Do NOT add or remove flows. Do NOT change api_call steps or wait/scroll/click steps.
+
+ENGAGEMENT SPEC SPANS:
+${spanList}
+
+FLOWS (JSON):
+${JSON.stringify(flows, null, 2).substring(0, 4000)}
+
+Return ONLY the topology-corrected flows as a valid JSON array. No markdown, no explanation.`;
+
+    try {
+      const raw = await this.callLLM([{ role: 'user', content: prompt }], settings.llm);
+      const corrected = JSON.parse(this.extractJsonFromResponse(raw));
+      if (Array.isArray(corrected)) return corrected;
+    } catch (err) {
+      console.warn('[validateFlowSpanTopology] Failed (non-fatal):', err);
+    }
+    return flows;
+  }
+
+  /**
+   * Agent 4: Widget Data Coverage Validator.
+   * Ensures every dashboard widget filter condition is satisfiable by the generated flows.
+   * Replaces has:error with success:false, removes filters on attributes not generated by any flow.
+   * Returns corrected flows (adds attribute values to api_call bodies where needed).
+   */
+  async validateWidgetDataCoverage(flows: any[], project: EngagementSpec): Promise<any[]> {
+    const settings = this.storage.getSettings();
+    if (!settings.llm.apiKey || !settings.llm.baseUrl) return flows;
+
+    const widgets: any[] = (project as any).dashboard?.widgets || [];
+    if (widgets.length === 0) return flows;
+
+    // Build widget filter summary
+    const widgetConditions = widgets
+      .flatMap((w: any) => (w.queries || []).map((q: any) => q.conditions || ''))
+      .filter(Boolean)
+      .join('\n');
+
+    // Build known attributes from spec
+    const knownAttributes = project.instrumentation.spans
+      .map(s => `${s.name}: [${Object.keys(s.attributes).join(', ')}]`)
+      .join('\n');
+
+    const prompt = `You are a dashboard data coverage validator for Puppeteer test flows.
+
+TASK: Ensure every flow generates data that satisfies the dashboard widget filter conditions below.
+1. For each widget condition that references a custom attribute (e.g. success:false, payment_method:stripe),
+   find the flow whose api_call step should produce that attribute.
+2. If an api_call body is missing a required attribute, add it with a realistic value.
+3. Replace any remaining has:error conditions with success:false in your mental model — the flows
+   should send "success: false" in api_call bodies for error scenario flows.
+4. Do NOT add or remove flows. Do NOT change navigate/wait/scroll steps.
+5. ONLY add attributes that are listed in KNOWN SPAN ATTRIBUTES below — never invent new attributes.
+
+DASHBOARD WIDGET CONDITIONS:
+${widgetConditions.substring(0, 1500)}
+
+KNOWN SPAN ATTRIBUTES:
+${knownAttributes}
+
+FLOWS (JSON):
+${JSON.stringify(flows, null, 2).substring(0, 4000)}
+
+Return ONLY the corrected flows as a valid JSON array. No markdown, no explanation.`;
+
+    try {
+      const raw = await this.callLLM([{ role: 'user', content: prompt }], settings.llm);
+      const corrected = JSON.parse(this.extractJsonFromResponse(raw));
+      if (Array.isArray(corrected)) return corrected;
+    } catch (err) {
+      console.warn('[validateWidgetDataCoverage] Failed (non-fatal):', err);
+    }
+    return flows;
+  }
+
+  /**
+   * Analyzes actual trace failures and generates specific, actionable rules using the LLM.
+   * These rules have unique titles derived from what the LLM actually observes in the span data,
+   * so they accumulate in the rules bank rather than deduplicating against generic templates.
+   */
+  async generateTrainingRules(
+    specName: string,
+    specVertical: string,
+    failingSummary: string,
+    spanSamples: Array<{ op: string; description: string; data?: Record<string, any>; status?: string }>
+  ): Promise<Array<{ category: string; title: string; rule: string; applyTo: string[] }>> {
+    const settings = this.storage.getSettings();
+    if (!settings.llm.apiKey || !settings.llm.baseUrl) return [];
+
+    const spanLines = spanSamples.slice(0, 12).map(s =>
+      `  op=${s.op} desc="${s.description}" status=${s.status || 'ok'} data=${JSON.stringify(s.data || {}).slice(0, 120)}`
+    ).join('\n');
+
+    const prompt = `You are a Sentry instrumentation expert analyzing trace quality failures from automated training.
+
+SPEC: ${specName} (${specVertical} vertical)
+
+FAILING CRITERIA:
+${failingSummary}
+
+SAMPLE SPANS FROM ACTUAL TRACES:
+${spanLines || '  (no spans captured)'}
+
+Generate 2–4 SPECIFIC, ACTIONABLE instrumentation rules that explain EXACTLY what code pattern in the generated app is causing these failures and how to fix it.
+
+Rules must be:
+- Specific to what you can see in the span data above (not generic principles)
+- Actionable (include exact code patterns, method names, or attribute names)
+- Different from these already-covered basics: "use continueTrace", "don't add api_call after networkidle2", "use METHOD /route format", "set http.status_code"
+
+Return ONLY a JSON array (no markdown, no explanation):
+[
+  {
+    "category": "orphan_spans|fe_be_connection|custom_spans|widget_data|span_gaps|span_timing|span_naming|attribute_completeness|transaction_completeness|general",
+    "title": "Short specific title (max 80 chars) — must be unique and specific to this failure",
+    "rule": "Detailed actionable rule with exact code patterns or attribute names",
+    "applyTo": ["generation"|"flows"|"dashboard"|"instrumentation"]
+  }
+]`;
+
+    try {
+      const raw = await this.callLLM(
+        [{ role: 'user', content: prompt }],
+        { ...settings.llm, temperature: 0.4 } as any
+      );
+      const json = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      const start = json.indexOf('[');
+      const end = json.lastIndexOf(']');
+      if (start === -1 || end === -1) return [];
+      const parsed = JSON.parse(json.slice(start, end + 1));
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter((r: any) =>
+        typeof r.category === 'string' &&
+        typeof r.title === 'string' && r.title.length > 5 &&
+        typeof r.rule === 'string' && r.rule.length > 20 &&
+        Array.isArray(r.applyTo)
+      );
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Public wrapper around callLLM for use by other services (e.g. GeneratorService
+   * fix-validate loop) that need direct LLM access without going through a
+   * project-specific flow.
+   */
+  async callLLMDirect(
+    messages: ChatMessage[],
+    config: { baseUrl?: string; apiKey?: string; model?: string; temperature?: number; timeoutMs?: number }
+  ): Promise<string> {
+    return this.callLLM(messages, { temperature: 0.2, ...config });
+  }
+
+  private async callLLM(
+    messages: ChatMessage[],
+    config: { baseUrl?: string; apiKey?: string; model?: string; temperature?: number; timeoutMs?: number }
+  ): Promise<string> {
+    const isLocal = config.baseUrl?.includes('localhost') || config.baseUrl?.includes('127.0.0.1');
+    const defaultTimeout = isLocal ? 600_000 : 120_000;
+    const { baseUrl, apiKey, model = 'gpt-4-turbo-preview', temperature = 0.7, timeoutMs = defaultTimeout } = config;
+
+    const bodyObj = {
+      model,
+      messages,
+      temperature,
+      max_tokens: 4000,
+      // Always stream for local models — mlx_lm.server holds the socket silent until
+      // the full response is ready in non-streaming mode, which triggers the inactivity
+      // timeout even for fast models. Streaming sends a token at a time so the socket
+      // stays alive throughout generation regardless of how long it takes.
+      ...(isLocal ? { stream: true } : {})
+    };
+    const bodyStr = JSON.stringify(bodyObj);
+
+    // Local models (MLX etc.) take minutes to process the prompt before sending
+    // the first response byte. Node's global fetch uses undici which has a 30s
+    // headersTimeout that fires before AbortController. Use http.request for
+    // local calls to avoid this entirely.
+    // Also serialize: MLX handles one request at a time. Concurrent calls cause
+    // the second socket to sit idle until the first finishes, triggering timeout.
+    if (isLocal) {
+      this.localQueueDepth++;
+      console.log(`[callLLM] queuing local request (queue depth: ${this.localQueueDepth})`);
+      const result = this.localQueue.then(async () => {
+        console.log(`[callLLM] starting local request (queue depth: ${this.localQueueDepth})`);
+        try {
+          return await this.callLLMHttp(baseUrl!, apiKey!, bodyStr, bodyObj.stream ?? false, timeoutMs);
+        } finally {
+          this.localQueueDepth--;
+          console.log(`[callLLM] finished local request (queue depth: ${this.localQueueDepth})`);
+        }
+      });
+      this.localQueue = result.catch(() => {});
+      return result;
     }
 
+    // Cloud path — normal fetch
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let response: Response;
+    try {
+      response = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        body: bodyStr
+      });
+    } catch (err: any) {
+      clearTimeout(timer);
+      const cause = err?.cause ? ` (cause: ${err.cause?.code || err.cause?.message || err.cause})` : '';
+      console.error(`[callLLM] fetch failed — url: ${baseUrl}/chat/completions, model: ${model}${cause}`);
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!response.ok) throw new Error(`LLM API error: ${response.status} ${await response.text()}`);
     const data = await response.json();
     return data.choices[0]?.message?.content || '';
+  }
+
+  private callLLMHttp(
+    baseUrl: string,
+    apiKey: string,
+    bodyStr: string,
+    streaming: boolean,
+    timeoutMs: number
+  ): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const url = new URL(`${baseUrl}/chat/completions`);
+      const req = http.request({
+        hostname: url.hostname,
+        port: Number(url.port) || 80,
+        path: url.pathname,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Length': Buffer.byteLength(bodyStr)
+        },
+        timeout: timeoutMs
+      }, (res) => {
+        if (res.statusCode && res.statusCode >= 400) {
+          let errBody = '';
+          res.on('data', (c: Buffer) => errBody += c.toString());
+          res.on('end', () => reject(new Error(`LLM API error: ${res.statusCode} ${errBody}`)));
+          return;
+        }
+
+        if (!streaming) {
+          let body = '';
+          res.on('data', (c: Buffer) => body += c.toString());
+          res.on('end', () => {
+            try {
+              const data = JSON.parse(body);
+              resolve(data.choices[0]?.message?.content || '');
+            } catch (e) {
+              reject(new Error(`Failed to parse LLM response: ${body.slice(0, 200)}`));
+            }
+          });
+          return;
+        }
+
+        // SSE streaming
+        let fullContent = '';
+        let tokenCount = 0;
+        let buf = '';
+        res.on('data', (chunk: Buffer) => {
+          buf += chunk.toString();
+          const lines = buf.split('\n');
+          buf = lines.pop() ?? '';
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            const data = line.slice(6).trim();
+            if (data === '[DONE]') continue;
+            try {
+              const parsed = JSON.parse(data);
+              const delta = parsed.choices?.[0]?.delta?.content;
+              if (delta) {
+                fullContent += delta;
+                tokenCount++;
+                if (tokenCount % 20 === 0) {
+                  this.streamProgressCallback?.(tokenCount, `Generating… (${tokenCount} tokens)`);
+                }
+              }
+            } catch { /* ignore malformed SSE lines */ }
+          }
+        });
+        res.on('end', () => resolve(fullContent));
+      });
+
+      req.on('timeout', () => {
+        console.error(`[callLLM] socket inactivity timeout after ${timeoutMs}ms — url: ${baseUrl}/chat/completions (streaming=${streaming})`);
+        req.destroy(new Error('LLM request timed out'));
+      });
+      req.on('error', (err) => {
+        console.error(`[callLLM] http request failed — url: ${baseUrl}/chat/completions`);
+        reject(err);
+      });
+      req.on('socket', (socket) => {
+        console.log(`[callLLM] socket assigned — streaming=${streaming}, timeoutMs=${timeoutMs}`);
+        socket.on('connect', () => console.log('[callLLM] socket connected'));
+        socket.on('close', (hadError) => console.log(`[callLLM] socket closed (hadError=${hadError})`));
+      });
+      req.write(bodyStr);
+      req.end();
+    });
   }
 }

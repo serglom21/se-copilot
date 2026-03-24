@@ -21,7 +21,7 @@ interface ProjectStore {
   deleteSpan: (index: number) => void;
   
   // Chat actions
-  sendMessage: (message: string) => Promise<string>;
+  sendMessage: (message: string) => Promise<{ content: string; extractedSpans: SpanDefinition[] }>;
   generatePlan: () => Promise<void>;
   
   // Generation actions
@@ -163,11 +163,11 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     if (!currentProject) throw new Error('No current project');
 
     const response = await window.electronAPI.sendChatMessage(currentProject.id, message);
-    
+
     // Reload project to get updated chat history
     await get().loadProject(currentProject.id);
-    
-    return response.content;
+
+    return { content: response.content, extractedSpans: response.extractedSpans ?? [] };
   },
 
   generatePlan: async () => {

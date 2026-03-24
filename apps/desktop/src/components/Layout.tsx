@@ -1,7 +1,7 @@
 import { Outlet, Link, useLocation } from 'react-router-dom';
 import {
   Home, Plus, FileText, Zap, Wrench, Play, Terminal, Upload, Activity, Settings,
-  CheckCircle2
+  CheckCircle2, FlaskConical
 } from 'lucide-react';
 import { useProjectStore } from '../store/project-store';
 
@@ -127,7 +127,10 @@ export default function Layout() {
           )}
         </nav>
 
-        <div className="px-3 py-3 border-t border-sentry-border">
+        <div className="px-3 py-3 border-t border-sentry-border space-y-0.5">
+          <NavItem to="/training" active={location.pathname.startsWith('/training')} icon={<FlaskConical size={15} />}>
+            Training
+          </NavItem>
           <NavItem to="/settings" active={location.pathname === '/settings'} icon={<Settings size={15} />}>
             Settings
           </NavItem>

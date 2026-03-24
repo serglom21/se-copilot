@@ -94,7 +94,11 @@ export class SentryAuthService {
           }
 
           const tokenData = await tokenRes.json();
-          const accessToken: string = tokenData.token;
+          console.log('[SentryAuth] Token exchange response:', JSON.stringify({ ...tokenData, token: tokenData.token ? '[REDACTED]' : undefined, access_token: tokenData.access_token ? '[REDACTED]' : undefined }));
+          const accessToken: string = tokenData.token || tokenData.access_token || '';
+          if (!accessToken) {
+            throw new Error(`Token exchange succeeded but no token in response. Keys: ${Object.keys(tokenData).join(', ')}`);
+          }
 
           // Fetch authenticated user info
           let user = { name: 'Sentry User', email: '' };
@@ -119,7 +123,7 @@ export class SentryAuthService {
             if (installRes.ok) {
               const installData = await installRes.json();
               const org = installData.organization;
-              if (org?.slug) orgs = [{ slug: org.slug, name: org.name }];
+              if (org?.slug) orgs = [{ slug: org.slug, name: org.name || org.slug }];
             }
           } catch { /* fall back */ }
           if (orgs.length === 0) orgs = await this.fetchOrgs(accessToken);
@@ -145,6 +149,7 @@ export class SentryAuthService {
             }
           } as any);
 
+          console.log('[SentryAuth] OAuth complete. Stored accessToken length:', accessToken.length, 'org:', orgs[0]?.slug);
           closePage('✅ Connected to Sentry!', 'Authentication successful. You can close this tab.');
           server.close();
           resolve({ success: true });
@@ -185,6 +190,7 @@ export class SentryAuthService {
   } {
     const settings = this.storage.getSettings() as any;
     const auth = settings.sentryAuth || {};
+    console.log('[SentryAuth] getAuthStatus — sentryAuth keys:', Object.keys(auth), 'hasToken:', !!auth.accessToken, 'tokenLen:', auth.accessToken?.length ?? 0);
     if (!auth.accessToken) return { authenticated: false };
     return {
       authenticated: true,
@@ -194,19 +200,34 @@ export class SentryAuthService {
   }
 
   async listOrganizations(): Promise<Array<{ slug: string; name: string }>> {
-    const token = this.getAccessToken();
+    let token = this.getAccessToken();
     if (!token) throw new Error('Not authenticated with Sentry');
-    return this.fetchOrgs(token);
+    const orgs = await this.fetchOrgs(token);
+    if (orgs.length === 0) {
+      // May have been a 401 — try refreshing
+      const refreshed = await this.refreshAccessToken();
+      if (refreshed) return this.fetchOrgs(refreshed);
+    }
+    return orgs;
   }
 
   async listProjects(orgSlug: string): Promise<Array<{ slug: string; name: string; platform?: string }>> {
-    const token = this.getAccessToken();
+    let token = this.getAccessToken();
     if (!token) throw new Error('Not authenticated with Sentry');
 
-    const res = await fetch(`https://sentry.io/api/0/organizations/${orgSlug}/projects/`, {
+    let res = await fetch(`https://sentry.io/api/0/organizations/${orgSlug}/projects/`, {
       headers: { 'Authorization': `Bearer ${token}` }
     });
-    // 404 means the integration isn't installed in this org — return empty rather than throw
+
+    // Token expired — try to refresh once and retry
+    if (res.status === 401) {
+      token = await this.refreshAccessToken() ?? token;
+      res = await fetch(`https://sentry.io/api/0/organizations/${orgSlug}/projects/`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+    }
+
+    // 404/403 means the integration isn't installed in this org — return empty rather than throw
     if (res.status === 404 || res.status === 403) return [];
     if (!res.ok) throw new Error(`Failed to list projects: ${res.status}`);
     const data = await res.json();
@@ -214,12 +235,15 @@ export class SentryAuthService {
   }
 
   async getProjectDsn(orgSlug: string, projectSlug: string): Promise<{ publicDsn: string } | null> {
-    const token = this.getAccessToken();
+    let token = this.getAccessToken();
     if (!token) return null;
 
-    const res = await fetch(`https://sentry.io/api/0/projects/${orgSlug}/${projectSlug}/keys/`, {
-      headers: { 'Authorization': `Bearer ${token}` }
-    });
+    const url = `https://sentry.io/api/0/projects/${orgSlug}/${projectSlug}/keys/`;
+    let res = await fetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
+    if (res.status === 401) {
+      token = await this.refreshAccessToken() ?? token;
+      res = await fetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
+    }
     if (!res.ok) return null;
     const keys = await res.json();
     const publicDsn = keys[0]?.dsn?.public;
@@ -235,6 +259,63 @@ export class SentryAuthService {
     return settings.sentryAuth?.accessToken || settings.sentry?.authToken || '';
   }
 
+  /** Refresh the OAuth access token using the stored refresh token. Returns the new token, or null on failure. */
+  private async refreshAccessToken(): Promise<string | null> {
+    const clientId = process.env.SENTRY_CLIENT_ID?.trim();
+    const clientSecret = process.env.SENTRY_CLIENT_SECRET?.trim();
+    if (!clientId || !clientSecret) return null;
+
+    const settings = this.storage.getSettings() as any;
+    const auth = settings.sentryAuth || {};
+    const { refreshToken, installationId } = auth;
+    if (!refreshToken || !installationId) {
+      console.warn('[SentryAuth] Cannot refresh — no refreshToken or installationId stored');
+      return null;
+    }
+
+    try {
+      console.log('[SentryAuth] Refreshing access token…');
+      const res = await fetch(
+        `https://sentry.io/api/0/sentry-app-installations/${installationId}/authorizations/`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            grant_type: 'refresh_token',
+            refresh_token: refreshToken,
+            client_id: clientId,
+            client_secret: clientSecret,
+          })
+        }
+      );
+
+      if (!res.ok) {
+        console.error('[SentryAuth] Token refresh failed:', res.status);
+        return null;
+      }
+
+      const data = await res.json();
+      const newAccessToken: string = data.token || data.access_token || '';
+      const newRefreshToken: string = data.refreshToken || data.refresh_token || refreshToken;
+      if (!newAccessToken) return null;
+
+      // Persist the new tokens
+      this.storage.updateSettings({
+        sentryAuth: { ...auth, accessToken: newAccessToken, refreshToken: newRefreshToken }
+      } as any);
+      const currentSentry = (this.storage.getSettings() as any).sentry || {};
+      this.storage.updateSettings({
+        sentry: { ...currentSentry, authToken: newAccessToken }
+      } as any);
+
+      console.log('[SentryAuth] Token refreshed successfully');
+      return newAccessToken;
+    } catch (err) {
+      console.error('[SentryAuth] Token refresh error:', err);
+      return null;
+    }
+  }
+
   private async fetchOrgs(token: string): Promise<Array<{ slug: string; name: string }>> {
     try {
       const res = await fetch('https://sentry.io/api/0/organizations/', {
@@ -242,7 +323,7 @@ export class SentryAuthService {
       });
       if (!res.ok) return [];
       const data = await res.json();
-      return data.map((o: any) => ({ slug: o.slug, name: o.name }));
+      return data.map((o: any) => ({ slug: o.slug, name: o.name || o.slug }));
     } catch {
       return [];
     }

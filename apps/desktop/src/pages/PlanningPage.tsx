@@ -15,7 +15,8 @@ type SuggestionState =
   | { status: 'loading' }
   | { status: 'shown'; message: string; spans: SpanDefinition[] }
   | { status: 'accepted'; count: number }
-  | { status: 'declined' };
+  | { status: 'declined' }
+  | { status: 'error'; message: string };
 
 // ── Inline markdown renderer ─────────────────────────────────────────────────
 function renderInline(text: string): React.ReactNode[] {
@@ -76,9 +77,12 @@ export default function PlanningPage() {
   const [chatInput, setInputValue] = useState('');
   const [generating, setGenerating] = useState(false);
   const [sending, setSending] = useState(false);
+  const [optimisticUserMessage, setOptimisticUserMessage] = useState<string | null>(null);
   const [editingSpan, setEditingSpan] = useState<{ index: number; span: SpanDefinition } | null>(null);
   const [newSpansAdded, setNewSpansAdded] = useState<string[]>([]);
   const [suggestionState, setSuggestionState] = useState<SuggestionState>({ status: 'idle' });
+  // Spans extracted from the last AI chat response (shown as addable chips)
+  const [lastChatSpans, setLastChatSpans] = useState<SpanDefinition[]>([]);
   const [lockConfirm, setLockConfirm] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<number | null>(null);
   const [chatError, setChatError] = useState<string | null>(null);
@@ -92,6 +96,23 @@ export default function PlanningPage() {
 
   useEffect(() => { if (projectId) loadProject(projectId); }, [projectId]);
 
+  const triggerSuggestion = (id: string) => {
+    suggestionTriggeredRef.current = true;
+    setSuggestionState({ status: 'loading' });
+    window.electronAPI.suggestCustomSpans(id)
+      .then(r => setSuggestionState({ status: 'shown', message: r.message, spans: r.spans }))
+      .catch((err: any) => {
+        const msg = err?.message ?? String(err);
+        const hint = msg.includes('not configured')
+          ? 'LLM not configured — add your Base URL and API key in Settings.'
+          : msg.includes('fetch') || msg.includes('ECONNREFUSED')
+          ? 'Could not reach the LLM server. Is it running?'
+          : msg;
+        setSuggestionState({ status: 'error', message: hint });
+        suggestionTriggeredRef.current = false; // allow retry
+      });
+  };
+
   useEffect(() => {
     if (
       currentProject &&
@@ -100,11 +121,7 @@ export default function PlanningPage() {
       !suggestionTriggeredRef.current &&
       projectId
     ) {
-      suggestionTriggeredRef.current = true;
-      setSuggestionState({ status: 'loading' });
-      window.electronAPI.suggestCustomSpans(projectId)
-        .then(r => setSuggestionState({ status: 'shown', message: r.message, spans: r.spans }))
-        .catch(() => setSuggestionState({ status: 'idle' }));
+      triggerSuggestion(projectId);
     }
   }, [currentProject?.id]);
 
@@ -117,21 +134,18 @@ export default function PlanningPage() {
     if (!chatInput.trim() || !projectId || sending) return;
     setChatError(null);
     setSending(true);
+    setLastChatSpans([]);
     const message = chatInput;
     setInputValue('');
+    setOptimisticUserMessage(message);
     try {
-      await sendMessage(message);
-      const updated = await window.electronAPI.getProject(projectId);
-      const prev = currentProject?.instrumentation.spans.length || 0;
-      if (updated.instrumentation.spans.length > prev) {
-        const names = updated.instrumentation.spans.slice(prev).map((s: SpanDefinition) => s.name);
-        setNewSpansAdded(names);
-        setTimeout(() => setNewSpansAdded([]), 5000);
-      }
+      const { extractedSpans } = await sendMessage(message);
+      if (extractedSpans.length > 0) setLastChatSpans(extractedSpans);
       await loadProject(projectId);
     } catch (err) {
       setChatError(String(err));
     } finally {
+      setOptimisticUserMessage(null);
       setSending(false);
       setTimeout(() => inputRef.current?.focus(), 50);
     }
@@ -188,6 +202,13 @@ export default function PlanningPage() {
     setTimeout(() => setNewSpansAdded([]), 5000);
   };
 
+  const handleAddAllChatSpans = () => {
+    lastChatSpans.forEach(s => addSpan(s));
+    setNewSpansAdded(lastChatSpans.map(s => s.name));
+    setTimeout(() => setNewSpansAdded([]), 5000);
+    setLastChatSpans([]);
+  };
+
   const toggleLayer = (layer: string) =>
     setOpenLayers(prev => {
       const next = new Set(prev);
@@ -207,7 +228,7 @@ export default function PlanningPage() {
   const spans = currentProject.instrumentation.spans;
   const feSpans = spans.filter(s => s.layer === 'frontend');
   const beSpans = spans.filter(s => s.layer === 'backend');
-  const showSuggestion = suggestionState.status === 'loading' || suggestionState.status === 'shown';
+  const showSuggestion = suggestionState.status === 'loading' || suggestionState.status === 'shown' || suggestionState.status === 'error';
   const project = currentProject.project;
   const stackType = currentProject.stack?.type;
 
@@ -323,6 +344,16 @@ export default function PlanningPage() {
                     </button>
                   </div>
                 </div>
+              ) : suggestionState.status === 'error' ? (
+                <div className="space-y-2">
+                  <p className="text-sm text-red-400/80">{suggestionState.message}</p>
+                  <button
+                    onClick={() => projectId && triggerSuggestion(projectId)}
+                    className="px-3 py-1.5 bg-white/5 border border-sentry-border text-white/50 text-xs rounded-lg hover:bg-white/10 transition-colors"
+                  >
+                    Retry
+                  </button>
+                </div>
               ) : null}
             </AIMessage>
           )}
@@ -346,8 +377,11 @@ export default function PlanningPage() {
             </div>
           )}
 
-          {currentProject.chatHistory.map((msg, idx) =>
-            msg.role === 'user' ? (
+          {currentProject.chatHistory.map((msg, idx) => {
+            const isLastAiMsg =
+              msg.role === 'assistant' &&
+              idx === currentProject.chatHistory.length - 1;
+            return msg.role === 'user' ? (
               <div key={idx} className="flex justify-end">
                 <div className="max-w-[70%] bg-sentry-purple-500/15 border border-sentry-purple-500/20 rounded-2xl rounded-tr-sm px-4 py-3">
                   <p className="text-sm text-white/85 leading-relaxed whitespace-pre-wrap">{msg.content}</p>
@@ -360,8 +394,32 @@ export default function PlanningPage() {
                   expanded={expandedMsgs.has(idx)}
                   onToggle={() => toggleExpand(idx)}
                 />
+                {isLastAiMsg && lastChatSpans.length > 0 && (
+                  <div className="mt-3 space-y-2 border-t border-sentry-border pt-3">
+                    <p className="text-[11px] text-white/30 font-medium uppercase tracking-wider">Suggested spans</p>
+                    <div className="flex flex-wrap gap-2">
+                      {lastChatSpans.map((span, i) => (
+                        <SuggestionChip key={i} span={span} onAdd={() => handleAddSingleSpan(span)} />
+                      ))}
+                    </div>
+                    <button
+                      onClick={handleAddAllChatSpans}
+                      className="px-3 py-1.5 bg-sentry-purple-500 text-white text-xs rounded-lg hover:bg-sentry-purple-400 transition-colors font-medium"
+                    >
+                      Add all {lastChatSpans.length} spans
+                    </button>
+                  </div>
+                )}
               </AIMessage>
-            )
+            );
+          })}
+
+          {optimisticUserMessage && (
+            <div className="flex justify-end">
+              <div className="max-w-[70%] bg-sentry-purple-500/15 border border-sentry-purple-500/20 rounded-2xl rounded-tr-sm px-4 py-3">
+                <p className="text-sm text-white/85 leading-relaxed whitespace-pre-wrap">{optimisticUserMessage}</p>
+              </div>
+            </div>
           )}
 
           {sending && (

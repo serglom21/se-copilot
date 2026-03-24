@@ -22,6 +22,8 @@ export interface IElectronAPI {
   generateGuide: (projectId: string) => Promise<{ success: boolean; outputPath?: string; error?: string }>;
   generateDashboard: (projectId: string) => Promise<{ success: boolean; outputPath?: string; error?: string }>;
   generateDataScript: (projectId: string) => Promise<{ success: boolean; outputPath?: string; error?: string }>;
+  onGenerationProgress: (callback: (pct: number, label: string) => void) => () => void;
+  onGenerationOutput: (callback: (line: string) => void) => () => void;
 
   // GitHub
   startGitHubAuth: () => Promise<{ device_code: string; user_code: string; verification_uri: string }>;
@@ -89,6 +91,27 @@ export interface IElectronAPI {
 
   // Browser
   openInChrome: (url: string) => Promise<void>;
+
+  // Local Trace Ingest
+  startTraceIngest: () => Promise<{ success: boolean; port?: number; dsn?: string; error?: string }>;
+  stopTraceIngest: () => Promise<{ success: boolean }>;
+  getLocalTraces: () => Promise<any[]>;
+  clearLocalTraces: () => Promise<{ success: boolean }>;
+  getTraceIngestStatus: () => Promise<{ running: boolean; dsn: string }>;
+
+  // Training
+  getTrainingSpecs: () => Promise<any[]>;
+  startTraining: (config: any) => Promise<{ success: boolean; error?: string }>;
+  stopTraining: () => Promise<{ success: boolean }>;
+  getTrainingStatus: () => Promise<{ running: boolean }>;
+  onTrainingLog: (callback: (msg: string) => void) => () => void;
+  onTrainingSpecResult: (callback: (result: any) => void) => () => void;
+  onTrainingComplete: (callback: (results: any[]) => void) => () => void;
+
+  // Rules Bank
+  listRules: () => Promise<any[]>;
+  deleteRule: (id: string) => Promise<{ success: boolean }>;
+  clearRules: () => Promise<{ success: boolean }>;
 }
 
 const electronAPI: IElectronAPI = {
@@ -113,6 +136,16 @@ const electronAPI: IElectronAPI = {
   generateGuide: (projectId) => ipcRenderer.invoke('generate:guide', projectId),
   generateDashboard: (projectId) => ipcRenderer.invoke('generate:dashboard', projectId),
   generateDataScript: (projectId) => ipcRenderer.invoke('generate:data-script', projectId),
+  onGenerationProgress: (callback) => {
+    const listener = (_event: any, { pct, label }: { pct: number; label: string }) => callback(pct, label);
+    ipcRenderer.on('generate:progress', listener);
+    return () => ipcRenderer.removeListener('generate:progress', listener);
+  },
+  onGenerationOutput: (callback) => {
+    const listener = (_event: any, line: string) => callback(line);
+    ipcRenderer.on('generate:output', listener);
+    return () => ipcRenderer.removeListener('generate:output', listener);
+  },
 
   // GitHub
   startGitHubAuth: () => ipcRenderer.invoke('github:start-auth'),
@@ -191,7 +224,40 @@ const electronAPI: IElectronAPI = {
   },
 
   // Browser
-  openInChrome: (url) => ipcRenderer.invoke('browser:open-in-chrome', url)
+  openInChrome: (url) => ipcRenderer.invoke('browser:open-in-chrome', url),
+
+  // Local Trace Ingest
+  startTraceIngest: () => ipcRenderer.invoke('trace:start-ingest'),
+  stopTraceIngest: () => ipcRenderer.invoke('trace:stop-ingest'),
+  getLocalTraces: () => ipcRenderer.invoke('trace:get-traces'),
+  clearLocalTraces: () => ipcRenderer.invoke('trace:clear'),
+  getTraceIngestStatus: () => ipcRenderer.invoke('trace:status'),
+
+  // Training
+  getTrainingSpecs: () => ipcRenderer.invoke('training:get-specs'),
+  startTraining: (config) => ipcRenderer.invoke('training:start', config),
+  stopTraining: () => ipcRenderer.invoke('training:stop'),
+  getTrainingStatus: () => ipcRenderer.invoke('training:status'),
+  onTrainingLog: (callback) => {
+    const listener = (_event: any, msg: string) => callback(msg);
+    ipcRenderer.on('training:log', listener);
+    return () => ipcRenderer.removeListener('training:log', listener);
+  },
+  onTrainingSpecResult: (callback) => {
+    const listener = (_event: any, result: any) => callback(result);
+    ipcRenderer.on('training:spec-result', listener);
+    return () => ipcRenderer.removeListener('training:spec-result', listener);
+  },
+  onTrainingComplete: (callback) => {
+    const listener = (_event: any, results: any[]) => callback(results);
+    ipcRenderer.on('training:complete', listener);
+    return () => ipcRenderer.removeListener('training:complete', listener);
+  },
+
+  // Rules Bank
+  listRules: () => ipcRenderer.invoke('rules:list'),
+  deleteRule: (id) => ipcRenderer.invoke('rules:delete', id),
+  clearRules: () => ipcRenderer.invoke('rules:clear'),
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);

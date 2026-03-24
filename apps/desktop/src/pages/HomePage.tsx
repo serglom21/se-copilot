@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import * as Sentry from '@sentry/react';
-import { Plus, FolderOpen, Github, Upload, Trash2, ExternalLink, MoreHorizontal } from 'lucide-react';
+import { Plus, FolderOpen, Github, Upload, Trash2, ExternalLink, MoreHorizontal, Loader2 } from 'lucide-react';
 import { useProjectStore } from '../store/project-store';
 import Button from '../components/Button';
 import { Input } from '../components/Input';
@@ -34,6 +34,7 @@ export default function HomePage() {
   const [credentials, setCredentials] = useState({ authToken: '', organization: '', dsn: '' });
   const [menuOpen, setMenuOpen] = useState<string | null>(null);
   const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null);
+  const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
 
   useEffect(() => {
     loadProjects();
@@ -59,9 +60,14 @@ export default function HomePage() {
 
   const handleDeleteProject = async (projectId: string) => {
     if (confirm('Delete this project? This cannot be undone.')) {
-      await deleteProject(projectId);
       setMenuOpen(null);
       setMenuPos(null);
+      setDeletingProjectId(projectId);
+      try {
+        await deleteProject(projectId);
+      } finally {
+        setDeletingProjectId(null);
+      }
     }
   };
 
@@ -206,8 +212,8 @@ export default function HomePage() {
           {projects.map((project, i) => (
             <div
               key={project.id}
-              className={`grid grid-cols-[1fr_120px_120px_90px_60px_110px] gap-4 px-4 py-3 items-center cursor-pointer transition-colors hover:bg-white/3 ${i < projects.length - 1 ? 'border-b border-sentry-border' : ''}`}
-              onClick={() => handleOpenProject(project)}
+              className={`grid grid-cols-[1fr_120px_120px_90px_60px_110px] gap-4 px-4 py-3 items-center transition-colors ${deletingProjectId === project.id ? 'opacity-50 pointer-events-none' : 'cursor-pointer hover:bg-white/3'} ${i < projects.length - 1 ? 'border-b border-sentry-border' : ''}`}
+              onClick={() => deletingProjectId !== project.id && handleOpenProject(project)}
             >
               <span className="text-sm font-medium text-white truncate">{project.project.name}</span>
               <span className="text-sm text-white/55 capitalize">{project.project.vertical}</span>
@@ -222,33 +228,41 @@ export default function HomePage() {
 
               {/* Actions */}
               <div className="flex items-center gap-1.5" onClick={e => e.stopPropagation()}>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => { setCurrentProject(project); navigate(`/project/${project.id}/plan`); }}
-                  title="Open project"
-                >
-                  Open
-                </Button>
-                <div>
+                {deletingProjectId === project.id ? (
+                  <span className="flex items-center gap-1.5 text-xs text-white/40 px-1">
+                    <Loader2 size={13} className="animate-spin" /> Deleting…
+                  </span>
+                ) : (
+                <>
                   <Button
                     size="sm"
                     variant="ghost"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (menuOpen === project.id) {
-                        setMenuOpen(null);
-                        setMenuPos(null);
-                      } else {
-                        const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                        setMenuPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
-                        setMenuOpen(project.id);
-                      }
-                    }}
+                    onClick={() => { setCurrentProject(project); navigate(`/project/${project.id}/plan`); }}
+                    title="Open project"
                   >
-                    <MoreHorizontal size={14} />
+                    Open
                   </Button>
-                </div>
+                  <div>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (menuOpen === project.id) {
+                          setMenuOpen(null);
+                          setMenuPos(null);
+                        } else {
+                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                          setMenuPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+                          setMenuOpen(project.id);
+                        }
+                      }}
+                    >
+                      <MoreHorizontal size={14} />
+                    </Button>
+                  </div>
+                </>
+                )}
               </div>
             </div>
           ))}

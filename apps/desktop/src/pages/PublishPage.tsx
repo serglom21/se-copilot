@@ -61,11 +61,11 @@ export default function PublishPage() {
     const status = await window.electronAPI.getSentryOAuthStatus();
     setSentryAuth(status);
     if (status.authenticated && status.orgs?.length) {
-      // Use org from settings if set, otherwise first org
       const settings = await window.electronAPI.getSettings();
       const savedOrg = settings?.sentry?.organization;
       const firstOrg = status.orgs[0].slug;
-      setPushOrg(savedOrg && status.orgs.some((o: any) => o.slug === savedOrg) ? savedOrg : firstOrg);
+      const org = savedOrg && status.orgs.some((o: any) => o.slug === savedOrg) ? savedOrg : firstOrg;
+      setPushOrg(org);
     }
   };
 

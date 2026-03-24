@@ -45,8 +45,9 @@ export default function DataGeneratorPage() {
   const [selectedOrg, setSelectedOrg] = useState('');
   const [projects, setProjects] = useState<Array<{ slug: string; name: string; platform?: string }>>([]);
   const [loadingProjects, setLoadingProjects] = useState(false);
-  const [selectedProject, setSelectedProject] = useState<{ slug: string; name: string } | null>(null);
-  const [loadingDsn, setLoadingDsn] = useState(false);
+  // Per-service selection: key is 'frontendDsn' or 'backendDsn'
+  const [selectedProjects, setSelectedProjects] = useState<Record<string, { slug: string; name: string } | null>>({});
+  const [loadingDsn, setLoadingDsn] = useState<Record<string, boolean>>({});
   const [showManualDsn, setShowManualDsn] = useState(false);
 
   // Post-run health check
@@ -86,7 +87,7 @@ export default function DataGeneratorPage() {
   const loadProjects = async (orgSlug: string) => {
     setLoadingProjects(true);
     setProjects([]);
-    setSelectedProject(null);
+    setSelectedProjects({});
     try {
       const list = await window.electronAPI.listSentryProjects(orgSlug);
       setProjects(list);
@@ -102,19 +103,19 @@ export default function DataGeneratorPage() {
     loadProjects(orgSlug);
   };
 
-  const handleSelectProject = async (project: { slug: string; name: string }) => {
-    setSelectedProject(project);
-    setLoadingDsn(true);
+  const handleSelectProject = async (dsnKey: string, project: { slug: string; name: string }) => {
+    setSelectedProjects(prev => ({ ...prev, [dsnKey]: project }));
+    setLoadingDsn(prev => ({ ...prev, [dsnKey]: true }));
     try {
       const result = await window.electronAPI.getSentryProjectDsn(selectedOrg, project.slug);
       if (result?.publicDsn) {
-        setConfig(c => ({ ...c, frontendDsn: result.publicDsn, backendDsn: result.publicDsn }));
+        setConfig(c => ({ ...c, [dsnKey]: result.publicDsn }));
       } else {
         toast.warning('No DSN found for this project — enter manually below');
         setShowManualDsn(true);
       }
     } finally {
-      setLoadingDsn(false);
+      setLoadingDsn(prev => ({ ...prev, [dsnKey]: false }));
     }
   };
 
@@ -240,7 +241,7 @@ export default function DataGeneratorPage() {
     <div className="h-full flex overflow-hidden">
 
       {/* ── Left: Config panel ── */}
-      <div className="w-72 shrink-0 border-r border-sentry-border flex flex-col">
+      <div className="w-1/2 shrink-0 border-r border-sentry-border flex flex-col">
         <div className="flex-1 overflow-y-auto px-5 py-6 space-y-5">
 
           <div>
@@ -252,10 +253,9 @@ export default function DataGeneratorPage() {
 
           {/* DSN picker */}
           <div className="space-y-3">
-            <p className="text-xs font-medium text-white/55">Sentry Project</p>
+            <p className="text-xs font-medium text-white/55">Sentry Projects</p>
 
             {sentryAuth.authenticated && (sentryAuth.orgs?.length ?? 0) === 0 ? (
-              /* Authenticated but no orgs stored — stale token, prompt reconnect */
               <div className="space-y-2">
                 <div className="text-[11px] text-yellow-400/80 bg-yellow-900/15 border border-yellow-700/30 rounded-lg px-3 py-2">
                   Sentry is connected but org info is missing. Please disconnect and reconnect in Settings.
@@ -285,104 +285,47 @@ export default function DataGeneratorPage() {
                   </select>
                 )}
 
-                <div className="rounded-lg border border-sentry-border overflow-hidden">
-                  {loadingProjects ? (
-                    <div className="px-3 py-3 text-xs text-white/30">Loading projects…</div>
-                  ) : projects.length === 0 ? (
-                    <div className="px-3 py-3 text-xs text-white/30">
-                      No projects found. The Demo Workbench integration may not be installed in this org.
-                    </div>
-                  ) : (
-                    <div className="max-h-48 overflow-y-auto divide-y divide-sentry-border">
-                      {projects.map(project => {
-                        const isSelected = selectedProject?.slug === project.slug;
-                        return (
-                          <button
-                            key={project.slug}
-                            onClick={() => handleSelectProject(project)}
-                            disabled={loadingDsn}
-                            className={`w-full flex items-center justify-between px-3 py-2.5 text-left transition-colors ${
-                              isSelected
-                                ? 'bg-sentry-purple-500/20 text-white'
-                                : 'text-white/65 hover:bg-white/5 hover:text-white'
-                            }`}
-                          >
-                            <div className="flex items-center gap-2 min-w-0">
-                              {isSelected && <CheckCircle2 size={11} className="text-sentry-purple-400 shrink-0" />}
-                              <span className="text-xs truncate">{project.name}</span>
-                            </div>
-                            {project.platform && (
-                              <span className="text-[10px] text-white/25 font-mono ml-2 shrink-0">{project.platform}</span>
-                            )}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-
-                <button
-                  className="flex items-center gap-1.5 text-[11px] text-white/25 hover:text-white/50 transition-colors"
-                  onClick={() => loadProjects(selectedOrg)}
-                  disabled={loadingProjects}
-                >
-                  <RefreshCw size={10} className={loadingProjects ? 'animate-spin' : ''} />
-                  Refresh
-                </button>
-
-                {loadingDsn && <p className="text-[11px] text-white/35">Fetching DSN…</p>}
-                {selectedProject && !loadingDsn && (config.frontendDsn || config.backendDsn) && (
-                  <div className="flex items-center gap-1.5 text-[11px] text-green-400">
-                    <CheckCircle2 size={11} />
-                    DSN loaded from <span className="font-medium">{selectedProject.name}</span>
-                  </div>
-                )}
+                {/* Per-service project pickers derived from stack */}
+                {deriveServices(currentProject.stack).map(service => (
+                  <ServiceProjectPicker
+                    key={service.dsnKey}
+                    service={service}
+                    projects={projects}
+                    loadingProjects={loadingProjects}
+                    selectedProject={selectedProjects[service.dsnKey] ?? null}
+                    loadingDsn={loadingDsn[service.dsnKey] ?? false}
+                    dsnValue={config[service.dsnKey as keyof typeof config] as string}
+                    onSelect={project => handleSelectProject(service.dsnKey, project)}
+                    onRefresh={() => loadProjects(selectedOrg)}
+                  />
+                ))}
 
                 <button
                   className="flex items-center gap-1 text-[11px] text-white/25 hover:text-white/50 transition-colors"
                   onClick={() => setShowManualDsn(v => !v)}
                 >
                   {showManualDsn ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
-                  Enter DSN manually
+                  Enter DSNs manually
                 </button>
 
                 {showManualDsn && (
-                  <div className="space-y-2">
-                    <Input
-                      label="Frontend DSN"
-                      placeholder="https://…@sentry.io/…"
-                      value={config.frontendDsn}
-                      onChange={e => setConfig({ ...config, frontendDsn: e.target.value })}
-                    />
-                    <Input
-                      label="Backend DSN"
-                      placeholder="https://…@sentry.io/…"
-                      value={config.backendDsn}
-                      onChange={e => setConfig({ ...config, backendDsn: e.target.value })}
-                    />
-                    <p className="text-[11px] text-white/25">Both can use the same DSN</p>
-                  </div>
+                  <ManualDsnInputs
+                    stack={currentProject.stack}
+                    config={config}
+                    onChange={partial => setConfig(c => ({ ...c, ...partial }))}
+                  />
                 )}
               </>
             ) : (
-              /* Not authenticated */
               <div className="space-y-3">
                 <div className="text-[11px] text-white/35 bg-white/3 border border-sentry-border rounded-lg px-3 py-2">
                   Connect Sentry in Settings to pick a project automatically.
                 </div>
-                <Input
-                  label="Frontend DSN"
-                  placeholder="https://…@sentry.io/…"
-                  value={config.frontendDsn}
-                  onChange={e => setConfig({ ...config, frontendDsn: e.target.value })}
+                <ManualDsnInputs
+                  stack={currentProject.stack}
+                  config={config}
+                  onChange={partial => setConfig(c => ({ ...c, ...partial }))}
                 />
-                <Input
-                  label="Backend DSN"
-                  placeholder="https://…@sentry.io/…"
-                  value={config.backendDsn}
-                  onChange={e => setConfig({ ...config, backendDsn: e.target.value })}
-                />
-                <p className="text-[11px] text-white/25">Both can use the same DSN</p>
               </div>
             )}
           </div>
@@ -544,6 +487,138 @@ function Stat({ label, value, sub, ok }: { label: string; value: string; sub?: s
       <div className={`text-sm font-semibold ${valueColor}`}>{value}</div>
       <div className="text-[10px] text-white/40">{label}</div>
       {sub && <div className="text-[10px] text-white/25">{sub}</div>}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+interface ServiceDef {
+  dsnKey: string;       // 'frontendDsn' or 'backendDsn'
+  label: string;        // e.g. 'Frontend', 'Mobile', 'Backend'
+  tech: string;         // e.g. 'Next.js', 'React Native', 'Express'
+}
+
+function deriveServices(stack: any): ServiceDef[] {
+  const type = stack?.type ?? 'web';
+  if (type === 'backend-only') {
+    return [{ dsnKey: 'backendDsn', label: 'Backend', tech: stack?.backend ?? 'express' }];
+  }
+  if (type === 'mobile') {
+    return [
+      { dsnKey: 'frontendDsn', label: 'Mobile', tech: 'React Native' },
+      { dsnKey: 'backendDsn', label: 'Backend', tech: stack?.backend ?? 'express' },
+    ];
+  }
+  // web (default)
+  return [
+    { dsnKey: 'frontendDsn', label: 'Frontend', tech: stack?.frontend ?? 'Next.js' },
+    { dsnKey: 'backendDsn', label: 'Backend', tech: stack?.backend ?? 'express' },
+  ];
+}
+
+// Per-service project picker
+function ServiceProjectPicker({
+  service, projects, loadingProjects, selectedProject, loadingDsn, dsnValue, onSelect, onRefresh,
+}: {
+  service: ServiceDef;
+  projects: Array<{ slug: string; name: string; platform?: string }>;
+  loadingProjects: boolean;
+  selectedProject: { slug: string; name: string } | null;
+  loadingDsn: boolean;
+  dsnValue: string;
+  onSelect: (p: { slug: string; name: string }) => void;
+  onRefresh: () => void;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] font-medium text-white/50">
+          {service.label} <span className="text-white/25 font-normal">— {service.tech}</span>
+        </span>
+        <button
+          className="text-white/20 hover:text-white/50 transition-colors"
+          onClick={onRefresh}
+          disabled={loadingProjects}
+          title="Refresh projects"
+        >
+          <RefreshCw size={10} className={loadingProjects ? 'animate-spin' : ''} />
+        </button>
+      </div>
+
+      <div className="rounded-lg border border-sentry-border overflow-hidden">
+        {loadingProjects ? (
+          <div className="px-3 py-2.5 text-xs text-white/30">Loading…</div>
+        ) : projects.length === 0 ? (
+          <div className="px-3 py-2.5 text-xs text-white/25">No projects found</div>
+        ) : (
+          <div className="max-h-36 overflow-y-auto divide-y divide-sentry-border">
+            {projects.map(project => {
+              const isSelected = selectedProject?.slug === project.slug;
+              return (
+                <button
+                  key={project.slug}
+                  onClick={() => onSelect(project)}
+                  disabled={loadingDsn}
+                  className={`w-full flex items-center justify-between px-3 py-2 text-left transition-colors ${
+                    isSelected
+                      ? 'bg-sentry-purple-500/20 text-white'
+                      : 'text-white/65 hover:bg-white/5 hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    {isSelected
+                      ? <CheckCircle2 size={11} className="text-sentry-purple-400 shrink-0" />
+                      : <span className="w-[11px] shrink-0" />
+                    }
+                    <span className="text-xs truncate">{project.name}</span>
+                  </div>
+                  {project.platform && (
+                    <span className="text-[10px] text-white/25 font-mono ml-2 shrink-0">{project.platform}</span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {loadingDsn && <p className="text-[11px] text-white/35">Fetching DSN…</p>}
+      {selectedProject && !loadingDsn && dsnValue && (
+        <div className="flex items-center gap-1.5 text-[11px] text-green-400">
+          <CheckCircle2 size={10} />
+          <span className="truncate">DSN from <span className="font-medium">{selectedProject.name}</span></span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Manual DSN inputs — shows only the fields relevant to the stack
+function ManualDsnInputs({
+  stack, config, onChange,
+}: {
+  stack: any;
+  config: { frontendDsn: string; backendDsn: string };
+  onChange: (partial: Partial<{ frontendDsn: string; backendDsn: string }>) => void;
+}) {
+  const services = deriveServices(stack);
+  return (
+    <div className="space-y-2">
+      {services.map(s => (
+        <Input
+          key={s.dsnKey}
+          label={`${s.label} DSN`}
+          placeholder="https://…@sentry.io/…"
+          value={config[s.dsnKey as keyof typeof config]}
+          onChange={e => onChange({ [s.dsnKey]: e.target.value })}
+        />
+      ))}
+      {services.length > 1 && (
+        <p className="text-[11px] text-white/25">Can use the same DSN for both services</p>
+      )}
     </div>
   );
 }

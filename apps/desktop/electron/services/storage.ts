@@ -34,10 +34,16 @@ export class StorageService {
     try {
       if (fs.existsSync(this.settingsPath)) {
         const data = fs.readFileSync(this.settingsPath, 'utf-8');
-        return SettingsSchema.parse(JSON.parse(data));
+        const raw = JSON.parse(data);
+        const result = SettingsSchema.safeParse(raw);
+        if (result.success) return result.data;
+        // Parse failed — preserve raw data by merging over defaults to avoid wiping valid fields
+        console.error('[Storage] Settings schema validation error (non-fatal):', result.error.message);
+        const defaults = SettingsSchema.parse({});
+        return { ...defaults, ...raw } as Settings;
       }
     } catch (error) {
-      console.error('Error reading settings:', error);
+      console.error('[Storage] Error reading settings:', error);
     }
     return SettingsSchema.parse({});
   }
@@ -46,6 +52,11 @@ export class StorageService {
     const current = this.getSettings();
     const updated = { ...current, ...settings };
     fs.writeFileSync(this.settingsPath, JSON.stringify(updated, null, 2));
+    // Verify write
+    const verify = JSON.parse(fs.readFileSync(this.settingsPath, 'utf-8'));
+    if ((settings as any).sentryAuth?.accessToken && !verify.sentryAuth?.accessToken) {
+      console.error('[Storage] BUG: sentryAuth.accessToken was not persisted!');
+    }
   }
 
   // Projects
@@ -121,10 +132,10 @@ export class StorageService {
     return validated;
   }
 
-  deleteProject(projectId: string): void {
+  async deleteProject(projectId: string): Promise<void> {
     const projectPath = path.join(this.projectsDir, `${projectId}.json`);
     if (fs.existsSync(projectPath)) {
-      fs.unlinkSync(projectPath);
+      await fs.promises.unlink(projectPath);
     }
   }
 
@@ -138,10 +149,10 @@ export class StorageService {
     }
   }
 
-  deleteProjectOutput(projectId: string): void {
+  async deleteProjectOutput(projectId: string): Promise<void> {
     const outputPath = this.resolveOutputPath(projectId);
     if (outputPath && fs.existsSync(outputPath)) {
-      fs.rmSync(outputPath, { recursive: true, force: true });
+      await fs.promises.rm(outputPath, { recursive: true, force: true });
     }
   }
 

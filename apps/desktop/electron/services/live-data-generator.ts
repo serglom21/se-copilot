@@ -1,4 +1,4 @@
-import { spawn, ChildProcess, exec, execSync } from 'child_process';
+import { spawn, ChildProcess, exec } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import puppeteer, { Browser, Page } from 'puppeteer';
@@ -19,6 +19,10 @@ export interface UserFlow {
   name: string;
   description: string;
   steps: FlowStep[];
+  /** Spec span names this flow is responsible for triggering */
+  coversSpans?: string[];
+  /** Flow names that must run before this flow (preconditions, e.g. add-to-cart before checkout) */
+  dependsOn?: string[];
 }
 
 export interface FlowStep {
@@ -30,6 +34,27 @@ export interface FlowStep {
   description?: string;
   method?: string;
   body?: Record<string, any>;
+}
+
+/**
+ * Merge flow corrections from four validation agents.
+ * Priority order: topology (highest) → route coherence → deduplication → widget coverage (lowest).
+ * A corrected version is accepted only if the agent returned a valid array of the same length.
+ */
+function mergeFlowCorrections(
+  original: UserFlow[],
+  topological: UserFlow[],
+  coherent: UserFlow[],
+  deduplicated: UserFlow[],
+  widgetCovered: UserFlow[]
+): UserFlow[] {
+  const accept = (candidate: UserFlow[], base: UserFlow[]): UserFlow[] =>
+    Array.isArray(candidate) && candidate.length === base.length ? candidate : base;
+
+  const afterTopology = accept(topological, original);
+  const afterCoherence = accept(coherent, afterTopology);
+  const afterDedup = accept(deduplicated, afterCoherence);
+  return accept(widgetCovered, afterDedup);
 }
 
 export class LiveDataGeneratorService {
@@ -56,7 +81,8 @@ export class LiveDataGeneratorService {
     projectId: string,
     config: LiveDataGenConfig,
     onOutput: (data: string) => void,
-    onError: (error: string) => void
+    onError: (error: string) => void,
+    traceIngestService: import('./trace-ingest').TraceIngestService
   ): Promise<{ success: boolean; error?: string }> {
     if (this.isRunning) {
       return { success: false, error: 'Data generator is already running' };
@@ -102,10 +128,11 @@ export class LiveDataGeneratorService {
       onOutput('🚀 Starting Live Data Generator\n');
       onOutput('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n');
 
-      // Step 1: Configure environment with DSNs
-      onOutput('📝 Step 1: Configuring Sentry DSNs...\n');
-      await this.configureDsns(appPath, config, project);
-      onOutput('   ✓ DSNs configured\n\n');
+      // Step 1: Configure environment — route through local proxy at 100% sample rate
+      onOutput('📝 Step 1: Configuring Sentry DSNs (local proxy)...\n');
+      const localDsn = traceIngestService.getLocalDsn();
+      await this.configureDsns(appPath, config, project, true, localDsn);
+      onOutput(`   ✓ DSNs configured → ${localDsn}\n\n`);
 
       // Step 2: Install dependencies if needed
       onOutput('📦 Step 2: Checking dependencies...\n');
@@ -134,19 +161,20 @@ export class LiveDataGeneratorService {
       await this.launchBrowser();
       onOutput('   ✓ Browser launched\n\n');
 
-      // Step 7: Execute user flows
+      // Step 7: Execute flows — telemetry goes to local proxy
       onOutput(`📊 Step 7: Executing ${config.numTraces} trace iterations...\n`);
       onOutput('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+      traceIngestService.clear();
 
       const errorRate = config.numErrors / config.numTraces;
-      
+
       for (let i = 0; i < config.numTraces; i++) {
         const flowIndex = i % userFlows.length;
         const flow = userFlows[flowIndex];
         const shouldError = Math.random() < errorRate;
 
         onOutput(`\n[${i + 1}/${config.numTraces}] Running: ${flow.name}${shouldError ? ' (with error)' : ''}\n`);
-        
+
         try {
           await this.executeFlow(flow, shouldError, project, onOutput);
           onOutput(`   ✓ Completed\n`);
@@ -154,23 +182,146 @@ export class LiveDataGeneratorService {
           onOutput(`   ⚠️ Flow error (this generates error telemetry): ${error}\n`);
         }
 
-        // Small delay between iterations to spread out the data
         await this.delay(500 + Math.random() * 1000);
       }
 
       onOutput('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-      onOutput('✅ Live data generation completed!\n\n');
-      onOutput('📈 Your Sentry dashboard should now show:\n');
-      onOutput('   • Connected distributed traces (FE ↔ BE)\n');
-      onOutput('   • Real SDK automatic instrumentation\n');
-      onOutput('   • Web Vitals and performance metrics\n');
-      onOutput('   • Custom spans with attributes\n');
+      onOutput('⏳ Waiting for traces to settle...\n');
+      let traces = await traceIngestService.waitForAllQuiet(2000);
+      onOutput(`   ✓ ${traces.length} traces captured\n\n`);
 
-      // Step 8: Verify coverage and retry missing spans
-      onOutput('\n🔍 Step 8: Verifying span coverage in Sentry...\n');
+      // Step 8: Validate → Repair loop
+      onOutput('🔍 Step 8: Validating trace structure...\n');
+      const settings = this.storage.getSettings();
+      const llmConfig = { baseUrl: settings.llm.baseUrl, apiKey: settings.llm.apiKey, model: settings.llm.model };
+      const MAX_ATTEMPTS = 4;
+
+      let repairedTraces = traces;
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        const { validateTraces, summarizeIssues } = await import('./trace-validator');
+        const { repairTraces, getRepairedSpanIds } = await import('./trace-repairer');
+        const { surgicalRepair, getFlowsToRerun } = await import('./surgical-repairer');
+
+        const issues = validateTraces(repairedTraces, project, userFlows);
+        if (issues.length === 0) {
+          onOutput(`   ✅ All traces valid (attempt ${attempt})\n\n`);
+          break;
+        }
+
+        const warnings = issues.filter(i => i.severity === 'warning');
+        const errors = issues.filter(i => i.severity !== 'warning');
+        onOutput(`   Attempt ${attempt}/${MAX_ATTEMPTS}: ${errors.length} errors, ${warnings.length} warnings — ${summarizeIssues(errors)}\n`);
+
+        // Auto-repair fixable issues in-memory
+        const fixable = issues.filter(i => i.fixable);
+        if (fixable.length > 0) {
+          repairedTraces = repairTraces(repairedTraces, fixable, project);
+          onOutput(`   🔧 Auto-repaired ${fixable.length} issues\n`);
+        }
+
+        // Surgical repair for non-fixable errors (skip on last attempt)
+        const nonFixable = errors.filter(i => !i.fixable);
+        if (nonFixable.length > 0 && attempt < MAX_ATTEMPTS) {
+          // Group issues by repairTarget so each file is patched once with ALL
+          // its issues in a single LLM call (avoids "LLM returned no changes"
+          // from patching the same file multiple times in sequence).
+          const byTarget = new Map<string, typeof nonFixable>();
+          for (const issue of nonFixable) {
+            if (issue.repairTarget === 'flows') continue;
+            const key = issue.repairTarget;
+            if (!byTarget.has(key)) byTarget.set(key, []);
+            byTarget.get(key)!.push(issue);
+          }
+
+          let needsBackendRestart = false;
+          let needsFrontendRestart = false;
+
+          for (const [, issueGroup] of byTarget) {
+            const patched = await surgicalRepair(
+              issueGroup, attempt, appPath, project, userFlows, llmConfig, onOutput,
+              this.llmService ?? undefined
+            );
+            if (patched.length > 0) {
+              if (patched.some(f => f.includes('backend') || f.endsWith('.py'))) needsBackendRestart = true;
+              if (patched.some(f => f.includes('frontend') || f.includes('sentry.client'))) needsFrontendRestart = true;
+            }
+          }
+
+          // Restart servers once after all patches are applied
+          if (needsBackendRestart) {
+            onOutput('   🔄 Restarting backend...\n');
+            await this.restartBackend(appPath, project, onOutput, onError);
+          }
+          if (needsFrontendRestart && project.stack.type !== 'backend-only') {
+            onOutput('   🔄 Restarting frontend...\n');
+            await this.restartFrontend(appPath, project, onOutput, onError);
+          }
+
+          // Re-run targeted flows to capture the missing spans.
+          // Clear the trace buffer first so each attempt validates a fresh set
+          // of traces — otherwise error counts grow unboundedly as traces accumulate.
+          const flowsToRerun = getFlowsToRerun(nonFixable, userFlows);
+          if (flowsToRerun.length > 0) {
+            onOutput(`   🔁 Re-running ${flowsToRerun.length} flows: ${flowsToRerun.map(f => f.name).join(', ')}\n`);
+            traceIngestService.clear(); // ← fresh slate for this attempt
+            for (const flow of flowsToRerun) {
+              try {
+                await this.executeFlow(flow, false, project, onOutput);
+              } catch (err) {
+                onOutput(`   ⚠️ Re-run flow error: ${err}\n`);
+              }
+              await this.delay(500);
+            }
+
+            onOutput('   ⏳ Waiting for new traces to settle...\n');
+            const freshTraces = await traceIngestService.waitForAllQuiet(2000);
+            repairedTraces = repairTraces(freshTraces, fixable, project);
+          }
+        } else if (nonFixable.length > 0 && attempt === MAX_ATTEMPTS) {
+          onOutput(`   ⚠ ${nonFixable.length} issues unresolved after ${MAX_ATTEMPTS} attempts:\n`);
+          nonFixable.forEach(i => onOutput(`     • ${i.kind}: ${i.detail}\n`));
+        }
+      }
+
+      // Step 9: Forward validated traces to real Sentry
+      onOutput('\n📤 Step 9: Forwarding validated traces to Sentry...\n');
+      const { repairTraces: rt, getRepairedSpanIds: grs } = await import('./trace-repairer');
+      const { forwardTracesToSentry } = await import('./trace-forwarder');
+      const { validateTraces: vt } = await import('./trace-validator');
+
+      const finalIssues = vt(repairedTraces, project, userFlows);
+      const finalFixable = finalIssues.filter(i => i.fixable);
+      const fullyRepaired = finalFixable.length > 0
+        ? rt(repairedTraces, finalFixable, project)
+        : repairedTraces;
+
+      const originalTraces = traceIngestService.getTraces();
+      const repairedIds = grs(originalTraces, fullyRepaired);
+      const allRawEnvelopes = traceIngestService.getAllRawEnvelopes();
+
+      const { forwarded, errors: fwdErrors } = await forwardTracesToSentry(
+        fullyRepaired,
+        allRawEnvelopes,
+        config.frontendDsn,
+        config.backendDsn,
+        repairedIds,
+        onOutput
+      );
+      onOutput(`   ✓ Forwarded ${forwarded} envelopes to Sentry\n`);
+      if (fwdErrors.length > 0) {
+        fwdErrors.forEach(e => onOutput(`   ⚠ ${e}\n`));
+      }
+
+      // Step 10: Verify coverage in Sentry
+      onOutput('\n🔍 Step 10: Verifying span coverage in Sentry...\n');
       onOutput('   ⏳ Waiting 15s for Sentry ingestion...\n');
       await this.delay(15000);
-      await this.verifyAndRetry(project, config, onOutput);
+      await this.verifyCoverage(project, onOutput);
+
+      onOutput('\n✅ Live data generation complete!\n');
+      onOutput('   • Traces validated and repaired locally\n');
+      onOutput('   • Forwarded to Sentry with full fidelity\n');
+      onOutput('   • Dashboard should be ready to view\n');
 
       return { success: true };
 
@@ -184,25 +335,37 @@ export class LiveDataGeneratorService {
     }
   }
 
-  private async configureDsns(appPath: string, config: LiveDataGenConfig, project: EngagementSpec): Promise<void> {
+  private async configureDsns(
+    appPath: string,
+    config: LiveDataGenConfig,
+    project: EngagementSpec,
+    useLocalProxy = false,
+    localDsn = ''
+  ): Promise<void> {
     const isBackendOnly = project.stack.type === 'backend-only';
     const isPythonBackend = project.stack.backend === 'flask' || project.stack.backend === 'fastapi';
 
+    // During local capture phase: route all telemetry through local proxy at 100% sample rate.
+    // During forward phase: this method is not called (DSNs are already set).
+    const feDsn = useLocalProxy ? localDsn : config.frontendDsn;
+    const beDsn = useLocalProxy ? localDsn : config.backendDsn;
+    const sampleRate = useLocalProxy ? '1.0' : '1.0'; // always 1.0 — sampling happens at forward time
+
     if (!isBackendOnly) {
-      // Frontend .env
       const frontendEnvPath = path.join(appPath, 'frontend', '.env.local');
-      const frontendEnv = `NEXT_PUBLIC_SENTRY_DSN=${config.frontendDsn}
+      const frontendEnv = `NEXT_PUBLIC_SENTRY_DSN=${feDsn}
 NEXT_PUBLIC_SENTRY_ENVIRONMENT=${config.environment}
+NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE=${sampleRate}
 NEXT_PUBLIC_API_URL=http://localhost:${this.BACKEND_PORT}
 `;
       fs.writeFileSync(frontendEnvPath, frontendEnv);
     }
 
-    // Backend .env
     const backendPath = path.join(appPath, isPythonBackend ? '' : 'backend');
     const backendEnvPath = path.join(backendPath, '.env');
-    const backendEnv = `SENTRY_DSN=${config.backendDsn}
+    const backendEnv = `SENTRY_DSN=${beDsn}
 SENTRY_ENVIRONMENT=${config.environment}
+SENTRY_TRACES_SAMPLE_RATE=${sampleRate}
 PORT=${this.BACKEND_PORT}
 `;
     fs.writeFileSync(backendEnvPath, backendEnv);
@@ -308,6 +471,36 @@ PORT=${this.BACKEND_PORT}
         if (!started) { started = true; resolve(); }
       }, 30000);
     });
+  }
+
+  private async restartBackend(
+    appPath: string,
+    project: EngagementSpec,
+    onOutput: (data: string) => void,
+    onError: (error: string) => void
+  ): Promise<void> {
+    if (this.backendProcess) {
+      try { process.kill(-this.backendProcess.pid!, 'SIGTERM'); } catch {}
+      this.backendProcess = null;
+    }
+    await this.delay(1000);
+    await this.startBackend(appPath, project, onOutput, onError);
+    await this.waitForServers(project);
+  }
+
+  private async restartFrontend(
+    appPath: string,
+    project: EngagementSpec,
+    onOutput: (data: string) => void,
+    onError: (error: string) => void
+  ): Promise<void> {
+    if (this.frontendProcess) {
+      try { process.kill(-this.frontendProcess.pid!, 'SIGTERM'); } catch {}
+      this.frontendProcess = null;
+    }
+    await this.delay(1000);
+    await this.startFrontend(appPath, project, onOutput, onError);
+    await this.waitForServers(project);
   }
 
   private async startFrontend(
@@ -512,18 +705,35 @@ PORT=${this.BACKEND_PORT}
             ? step.url
             : `http://localhost:${this.BACKEND_PORT}${step.url}`;
           try {
+            // Wrap in a Sentry span so sentry-trace header is propagated to the backend.
+            // Without this, api_call fetches made after pageload settles have no active
+            // transaction and arrive at the backend as orphan spans.
             await page.evaluate(
-              async (params: { url: string; method: string; body: any }) => {
-                const opts: RequestInit = {
-                  method: params.method,
-                  headers: { 'Content-Type': 'application/json' },
+              async (params: { url: string; method: string; body: any; spanName: string }) => {
+                const win = window as any;
+                const makeRequest = async () => {
+                  const opts: RequestInit = { method: params.method };
+                  if (params.method !== 'GET') {
+                    opts.body = JSON.stringify(params.body || {});
+                    opts.headers = { 'Content-Type': 'application/json' };
+                  }
+                  await fetch(params.url, opts).then(r => r.json()).catch(() => null);
                 };
-                if (params.method !== 'GET') {
-                  opts.body = JSON.stringify(params.body || {});
+                if (win.Sentry?.startSpan) {
+                  await win.Sentry.startSpan(
+                    { name: params.spanName, op: 'http.client' },
+                    makeRequest
+                  );
+                } else {
+                  await makeRequest();
                 }
-                await fetch(params.url, opts).then(r => r.json()).catch(() => null);
               },
-              { url: fullUrl, method: step.method || 'POST', body: step.body || {} }
+              {
+                url: fullUrl,
+                method: step.method || 'POST',
+                body: step.body || {},
+                spanName: step.description || `${step.method || 'POST'} ${step.url}`
+              }
             );
           } catch {
             // api_call failures are non-fatal — the navigate already generated a trace
@@ -668,13 +878,31 @@ PORT=${this.BACKEND_PORT}
     const runId = `${project.id.substring(0, 8)}-${Date.now()}`;
 
     // Delegate to LLM service
-    const flows = await this.llmService!.generateUserFlows(
+    let flows = await this.llmService!.generateUserFlows(
       project,
       backendRoutesCode,
       frontendPages,
       widgetFilters,
       runId
     );
+
+    // Run 4-agent validation pipeline in parallel
+    onOutput('🔍 Running flow validation pipeline...\n');
+    try {
+      const [coherent, deduplicated, topological, widgetCovered] = await Promise.all([
+        this.llmService!.validateFlowRouteCoherence(flows, backendRoutesCode),
+        this.llmService!.eliminateDuplicateSpanFlows(flows, frontendPages),
+        this.llmService!.validateFlowSpanTopology(flows, project),
+        this.llmService!.validateWidgetDataCoverage(flows, project),
+      ]);
+      flows = mergeFlowCorrections(flows, topological, coherent, deduplicated, widgetCovered);
+      onOutput('   ✓ Route coherence validated\n');
+      onOutput('   ✓ Duplicate spans eliminated\n');
+      onOutput('   ✓ Span topology validated\n');
+      onOutput('   ✓ Widget data coverage validated\n');
+    } catch (err) {
+      onOutput(`   ⚠️ Flow validation pipeline failed (non-fatal): ${err}\n`);
+    }
 
     // Persist run ID so verifyAndRetry can filter by it
     (this as any)._currentRunId = runId;
@@ -696,12 +924,10 @@ PORT=${this.BACKEND_PORT}
   }
 
   /**
-   * After flows run, query Sentry to check which spec spans appeared.
-   * For any missing spans, run targeted api_call flows and retry.
+   * After flows run, query Sentry once to report which spec spans appeared.
    */
-  private async verifyAndRetry(
+  private async verifyCoverage(
     project: EngagementSpec,
-    config: LiveDataGenConfig,
     onOutput: (data: string) => void
   ): Promise<void> {
     if (!this.sentryService) {
@@ -718,103 +944,17 @@ PORT=${this.BACKEND_PORT}
         this._runStartTime
       );
 
-      if (found.length > 0) {
-        onOutput(`   ✓ Verified: ${found.join(', ')}\n`);
-      }
+      if (found.length > 0) onOutput(`   ✓ Verified: ${found.join(', ')}\n`);
 
       if (missing.length === 0) {
         onOutput('   ✅ All spec spans verified in Sentry!\n');
-        return;
-      }
-
-      onOutput(`   ⚠️ Missing spans: ${missing.join(', ')}\n`);
-      onOutput('   🔄 Running targeted retry flows...\n');
-
-      // Build targeted api_call flows for each missing span
-      const missingSpans = project.instrumentation.spans.filter(s => missing.includes(s.name));
-      const retryFlows = this.buildTargetedRetryFlows(missingSpans, config);
-
-      if (retryFlows.length > 0 && this.browser) {
-        for (const flow of retryFlows) {
-          onOutput(`   → Retrying: ${flow.name}\n`);
-          try {
-            await this.executeFlow(flow, false, project, onOutput);
-          } catch (err) {
-            onOutput(`   ⚠️ Retry failed: ${err}\n`);
-          }
-          await this.delay(500);
-        }
-
-        onOutput('   ⏳ Waiting 10s for retry ingestion...\n');
-        await this.delay(10000);
-
-        // Second verification pass
-        const { found: found2, missing: missing2 } = await this.sentryService.querySpansByName(
-          missing,
-          this._runStartTime
-        );
-        if (found2.length > 0) onOutput(`   ✓ Retry recovered: ${found2.join(', ')}\n`);
-        if (missing2.length > 0) {
-          onOutput(`   ⚠️ Still missing after retry: ${missing2.join(', ')}\n`);
-          onOutput('   💡 Check that DSNs are set and SDK is initialized before route handlers\n');
-        }
+      } else {
+        onOutput(`   ⚠️ Missing spans: ${missing.join(', ')}\n`);
+        onOutput('   💡 Check that DSNs are set and SDK is initialized before route handlers\n');
       }
     } catch (err) {
       onOutput(`   ⚠️ Verification error (non-fatal): ${err}\n`);
     }
-  }
-
-  /**
-   * Build simple api_call flows for missing spans based on the engagement spec.
-   */
-  private buildTargetedRetryFlows(
-    spans: any[],
-    config: LiveDataGenConfig
-  ): UserFlow[] {
-    const READ_KEYWORDS = ['fetch', 'load', 'get', 'list', 'read', 'query', 'search', 'filter', 'view', 'show', 'detail'];
-    const spanMethod = (name: string) =>
-      READ_KEYWORDS.some(k => name.toLowerCase().includes(k)) ? 'GET' : 'POST';
-
-    const deriveRoute = (spanName: string): string => {
-      const parts = spanName.split('.');
-      if (parts.length === 1) return `/${parts[0].replace(/_/g, '-')}`;
-      const ns = parts[0];
-      const action = parts.slice(1).join('/').replace(/_/g, '-');
-      return `/${ns}/${action}`;
-    };
-
-    return spans.map(span => {
-      const method = spanMethod(span.name);
-      const endpoint = `/api${deriveRoute(span.name)}`;
-      const body: Record<string, any> = { se_copilot_run_id: (this as any)._currentRunId || 'retry' };
-
-      // Seed body with realistic attribute values
-      for (const key of Object.keys(span.attributes)) {
-        const k = key.toLowerCase();
-        if (k.includes('id')) body[key] = `test-${k}-001`;
-        else if (k.includes('email')) body[key] = 'test@example.com';
-        else if (k.includes('amount') || k.includes('price')) body[key] = 99.99;
-        else if (k.includes('count') || k.includes('quantity')) body[key] = 3;
-        else body[key] = 'test-value';
-      }
-
-      return {
-        name: `Retry: ${this.humanizeName(span.name)}`,
-        description: `Targeted retry for ${span.name}`,
-        steps: [
-          { action: 'navigate' as const, url: '/' },
-          { action: 'wait' as const, duration: 500 },
-          {
-            action: 'api_call' as const,
-            url: `http://localhost:${this.BACKEND_PORT}${endpoint}`,
-            method,
-            body,
-            description: `Call ${method} ${endpoint}`
-          },
-          { action: 'wait' as const, duration: 1000 }
-        ]
-      };
-    });
   }
 
   /**
@@ -861,8 +1001,19 @@ PORT=${this.BACKEND_PORT}
     for (const widget of widgets) {
       const queries: any[] = widget.queries || [];
       for (const query of queries) {
-        const conditions: string = query.conditions || '';
+        let conditions: string = query.conditions || '';
         if (!conditions) continue;
+
+        // Sanitize: has:error does not work in Sentry span widgets — replace with success:false
+        if (conditions.includes('has:error')) {
+          conditions = conditions.replace(/\bhas:error\b/g, 'success:false');
+          query.conditions = conditions;
+        }
+        if (conditions.includes('!has:error')) {
+          conditions = conditions.replace(/!has:error\b/g, 'success:true');
+          query.conditions = conditions;
+        }
+
         for (const span of project.instrumentation.spans) {
           if (conditions.includes(span.name) || conditions.includes(span.op)) {
             filters.push({ spanName: span.name, conditions });
@@ -1141,6 +1292,10 @@ PORT=${this.BACKEND_PORT}
   async stop(): Promise<void> {
     await this.cleanup(() => {});
     this.isRunning = false;
+  }
+
+  getIsRunning(): boolean {
+    return this.isRunning;
   }
 
   /**

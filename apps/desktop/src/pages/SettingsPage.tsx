@@ -103,13 +103,12 @@ export default function SettingsPage() {
             value={settings.llm?.apiKey || ''}
             onChange={e => setSettings({ ...settings, llm: { ...settings.llm, apiKey: e.target.value } })}
           />
-          <Input
-            label="Model"
-            placeholder="gpt-4-turbo-preview"
+          <ModelPicker
+            baseUrl={settings.llm?.baseUrl || ''}
             value={settings.llm?.model || ''}
-            onChange={e => setSettings({ ...settings, llm: { ...settings.llm, model: e.target.value } })}
+            onChange={model => setSettings({ ...settings, llm: { ...settings.llm, model } })}
           />
-          <p className="text-xs text-white/35">Any OpenAI-compatible endpoint works (OpenAI, Azure OpenAI, etc.)</p>
+          <p className="text-xs text-white/35">Any OpenAI-compatible endpoint works (OpenAI, Groq, xAI, Azure, etc.)</p>
         </Section>
 
         {/* GitHub */}
@@ -140,6 +139,7 @@ export default function SettingsPage() {
               {settings.github?.accessToken && (
                 <Button size="sm" variant="secondary" onClick={async () => {
                   try {
+                    await window.electronAPI.updateSettings(settings);
                     const result = await window.electronAPI.pollGitHubAuth('manual');
                     if (result.success) { await loadSettings(); toast.success('Token verified'); }
                     else toast.error('Verification failed: ' + result.error);
@@ -303,6 +303,83 @@ export default function SettingsPage() {
           </div>
         </Section>
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Model presets keyed by base URL substring
+// ---------------------------------------------------------------------------
+const MODEL_PRESETS: Record<string, { label: string; models: string[] }> = {
+  'groq.com': {
+    label: 'Groq',
+    models: [
+      'llama-3.3-70b-versatile',
+      'llama-3.1-70b-versatile',
+      'llama-3.1-8b-instant',
+      'llama3-70b-8192',
+      'mixtral-8x7b-32768',
+      'gemma2-9b-it',
+      'deepseek-r1-distill-llama-70b',
+      'qwen-qwq-32b',
+    ],
+  },
+  'api.x.ai': {
+    label: 'xAI / Grok',
+    models: ['grok-3', 'grok-3-fast', 'grok-2-1212', 'grok-2-vision-1212'],
+  },
+  'openai.com': {
+    label: 'OpenAI',
+    models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo-preview', 'o3-mini', 'o1-mini'],
+  },
+  'anthropic': {
+    label: 'Anthropic',
+    models: ['claude-sonnet-4-6', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'],
+  },
+};
+
+function ModelPicker({ baseUrl, value, onChange }: {
+  baseUrl: string;
+  value: string;
+  onChange: (model: string) => void;
+}) {
+  const preset = Object.entries(MODEL_PRESETS).find(([key]) => baseUrl.includes(key));
+
+  return (
+    <div className="space-y-1.5">
+      <label className="block text-xs font-medium text-white/60">Model</label>
+      {preset ? (
+        <div className="space-y-2">
+          <select
+            value={value}
+            onChange={e => onChange(e.target.value)}
+            className="w-full bg-sentry-background border border-sentry-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-sentry-purple-500 focus:ring-1 focus:ring-sentry-purple-500/30"
+          >
+            {!preset[1].models.includes(value) && value && (
+              <option value={value}>{value}</option>
+            )}
+            {preset[1].models.map(m => (
+              <option key={m} value={m}>{m}</option>
+            ))}
+          </select>
+          <p className="text-[11px] text-white/30">{preset[1].label} — select or type a custom model ID below</p>
+          <input
+            type="text"
+            placeholder="Custom model ID…"
+            value={value}
+            onChange={e => onChange(e.target.value)}
+            className="w-full bg-sentry-background border border-sentry-border rounded-lg px-3 py-2 text-sm text-white placeholder-white/20 focus:outline-none focus:border-sentry-purple-500 focus:ring-1 focus:ring-sentry-purple-500/30"
+          />
+        </div>
+      ) : (
+        <input
+          type="text"
+          placeholder="gpt-4-turbo-preview"
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          className="w-full bg-sentry-background border border-sentry-border rounded-lg px-3 py-2 text-sm text-white placeholder-white/20 focus:outline-none focus:border-sentry-purple-500 focus:ring-1 focus:ring-sentry-purple-500/30"
+        />
+      )}
     </div>
   );
 }

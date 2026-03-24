@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Zap, FileText, BarChart2, Database, Upload, Package, ExternalLink, CheckCircle2 } from 'lucide-react';
 import { useProjectStore } from '../store/project-store';
@@ -25,9 +25,24 @@ export default function GeneratePage() {
   const [exporting, setExporting] = useState(false);
   const [generateAllLoading, setGenerateAllLoading] = useState(false);
 
+  // Generation progress
+  const [genProgress, setGenProgress] = useState<{ pct: number; label: string } | null>(null);
+  const progressCleanupRef = useRef<(() => void) | null>(null);
+
+  // Build validation log
+  const [buildLog, setBuildLog] = useState<string[]>([]);
+  const buildLogRef = useRef<HTMLDivElement>(null);
+  const outputCleanupRef = useRef<(() => void) | null>(null);
+
   useEffect(() => {
     if (projectId) loadProject(projectId);
   }, [projectId]);
+
+  useEffect(() => {
+    if (buildLogRef.current) {
+      buildLogRef.current.scrollTop = buildLogRef.current.scrollHeight;
+    }
+  }, [buildLog]);
 
   useEffect(() => {
     const load = async () => {
@@ -44,8 +59,35 @@ export default function GeneratePage() {
     load();
   }, [currentProject?.id, currentProject?.status]);
 
+  const startProgressTracking = () => {
+    if (progressCleanupRef.current) progressCleanupRef.current();
+    setGenProgress({ pct: 0, label: 'Starting…' });
+    const cleanup = window.electronAPI.onGenerationProgress((pct, label) => {
+      setGenProgress({ pct, label });
+    });
+    progressCleanupRef.current = cleanup;
+
+    if (outputCleanupRef.current) outputCleanupRef.current();
+    setBuildLog([]);
+    const outputCleanup = window.electronAPI.onGenerationOutput((line) => {
+      setBuildLog(prev => [...prev, line].slice(-200));
+    });
+    outputCleanupRef.current = outputCleanup;
+
+    return cleanup;
+  };
+
+  const stopProgressTracking = () => {
+    progressCleanupRef.current?.();
+    progressCleanupRef.current = null;
+    setGenProgress(null);
+    outputCleanupRef.current?.();
+    outputCleanupRef.current = null;
+  };
+
   const handleGenerateApp = async () => {
     setStatus(s => ({ ...s, app: { ...s.app, loading: true } }));
+    startProgressTracking();
     try {
       const result = await generateApp();
       if (!result.success) throw new Error(result.error);
@@ -58,6 +100,8 @@ export default function GeneratePage() {
     } catch (error) {
       toast.error('Failed to generate app: ' + error);
       setStatus(s => ({ ...s, app: { ...s.app, loading: false } }));
+    } finally {
+      stopProgressTracking();
     }
   };
 
@@ -122,6 +166,7 @@ export default function GeneratePage() {
   const handleGenerateAll = async () => {
     setGenerateAllLoading(true);
     setStatus({ app: { generated: false, loading: true, path: '' }, guide: { generated: false, loading: true, path: '' }, dashboard: { generated: false, loading: true, path: '' }, dataScript: { generated: false, loading: true, path: '' } });
+    startProgressTracking();
     try {
       const [appR, guideR, dashR, dataR] = await Promise.allSettled([generateApp(), generateGuide(), generateDashboard(), generateDataScript()]);
       setStatus({
@@ -139,6 +184,7 @@ export default function GeneratePage() {
       toast.error('Generation error: ' + error);
     } finally {
       setGenerateAllLoading(false);
+      stopProgressTracking();
     }
   };
 
@@ -179,6 +225,35 @@ export default function GeneratePage() {
           </Button>
         </div>
       </div>
+
+      {/* Generation progress bar */}
+      {genProgress && (
+        <div className="mb-5 space-y-1.5">
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-white/60">{genProgress.label}</span>
+            <span className="text-white/35 tabular-nums">{genProgress.pct}%</span>
+          </div>
+          <div className="h-1.5 w-full bg-white/8 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-sentry-purple-400 rounded-full transition-all duration-500 ease-out"
+              style={{ width: `${genProgress.pct}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Build validation log */}
+      {buildLog.length > 0 && (
+        <div className="mb-5 border border-sentry-border rounded-lg bg-black/40 overflow-hidden">
+          <div className="px-3 py-1.5 border-b border-sentry-border flex items-center justify-between">
+            <span className="text-[11px] text-white/40 uppercase tracking-wide font-medium">Build Validation Log</span>
+            <button onClick={() => setBuildLog([])} className="text-[11px] text-white/25 hover:text-white/50">Clear</button>
+          </div>
+          <div ref={buildLogRef} className="p-3 max-h-40 overflow-y-auto font-mono text-[11px] text-white/60 whitespace-pre-wrap leading-relaxed">
+            {buildLog.join('')}
+          </div>
+        </div>
+      )}
 
       {/* Project summary */}
       <div className="border border-sentry-border rounded-lg p-4 mb-5 bg-sentry-surface">

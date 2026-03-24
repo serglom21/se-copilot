@@ -21,6 +21,9 @@ import { ExpoDeployService } from './services/expo-deploy';
 import { SentryAPIService } from './services/sentry-api';
 import { SentryAuthService } from './services/sentry-auth';
 import { ExportService } from './services/export';
+import { TraceIngestService } from './services/trace-ingest';
+import { TrainingRunnerService, BUILTIN_SPECS } from './services/training-runner';
+import { RulesBankService } from './services/rules-bank';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -45,6 +48,9 @@ let expoDeployService: ExpoDeployService;
 let sentryAPIService: SentryAPIService;
 let sentryAuthService: SentryAuthService;
 let exportService: ExportService;
+let traceIngestService: TraceIngestService;
+let trainingRunner: TrainingRunnerService;
+let rulesBank: RulesBankService;
 
 function createWindow() {
   win = new BrowserWindow({
@@ -85,6 +91,18 @@ app.whenReady().then(async () => {
   deploymentService = new DeploymentService(storage);
   expoDeployService = new ExpoDeployService(storage);
   exportService = new ExportService(storage);
+  traceIngestService = new TraceIngestService(9999);
+  // Auto-start the local trace ingest server on app launch
+  traceIngestService.start().catch(e => console.warn('[TraceIngest] Auto-start failed (port in use?):', e.message));
+  // Backup dir: ~/Documents/SE Copilot/ — outside app userData, survives crashes/reinstalls
+  const backupDir = path.join(app.getPath('documents'), 'SE Copilot');
+  rulesBank = new RulesBankService(userDataPath, backupDir);
+  llmService.setRulesBank(rulesBank);
+  // Re-create GeneratorService with rulesBank so static generators are also rule-aware
+  generatorService = new GeneratorService(storage, llmService, rulesBank);
+  trainingRunner = new TrainingRunnerService(
+    storage, llmService, generatorService, liveDataGeneratorService, traceIngestService, rulesBank
+  );
 
   setupIpcHandlers();
   createWindow();
@@ -137,7 +155,7 @@ function setupIpcHandlers() {
       await liveDataGeneratorService.killProcessesInDirectory(outputPath);
     }
     // Delete output folder on disk, then the project spec
-    storage.deleteProjectOutput(projectId);
+    await storage.deleteProjectOutput(projectId);
     return storage.deleteProject(projectId);
   });
 
@@ -158,7 +176,11 @@ function setupIpcHandlers() {
   // Generation
   ipcMain.handle('generate:app', async (_, projectId: string) => {
     const project = storage.getProject(projectId);
-    return generatorService.generateReferenceApp(project);
+    return generatorService.generateReferenceApp(
+      project,
+      (pct, label) => { win?.webContents.send('generate:progress', { pct, label }); },
+      (line) => { win?.webContents.send('generate:output', line); }
+    );
   });
 
   ipcMain.handle('generate:guide', async (_, projectId: string) => {
@@ -200,7 +222,8 @@ function setupIpcHandlers() {
       },
       (error) => {
         event.sender.send('data:error', error);
-      }
+      },
+      traceIngestService
     );
   });
 
@@ -394,6 +417,80 @@ function setupIpcHandlers() {
         resolve();
       });
     });
+  });
+
+  // Local Trace Ingest
+  ipcMain.handle('trace:start-ingest', async () => {
+    try {
+      await traceIngestService.start();
+      return { success: true, port: 9999, dsn: traceIngestService.getLocalDsn() };
+    } catch (e: any) {
+      return { success: false, error: String(e) };
+    }
+  });
+
+  ipcMain.handle('trace:stop-ingest', async () => {
+    traceIngestService.stop();
+    return { success: true };
+  });
+
+  ipcMain.handle('trace:get-traces', async () => {
+    return traceIngestService.getTraces();
+  });
+
+  ipcMain.handle('trace:clear', async () => {
+    traceIngestService.clear();
+    return { success: true };
+  });
+
+  ipcMain.handle('trace:status', async () => {
+    return { running: traceIngestService.isRunning(), dsn: traceIngestService.getLocalDsn() };
+  });
+
+  // Training
+  ipcMain.handle('training:get-specs', async () => {
+    return BUILTIN_SPECS;
+  });
+
+  ipcMain.handle('training:start', async (event, config: any) => {
+    if (trainingRunner.isRunning()) {
+      return { success: false, error: 'Training already in progress' };
+    }
+    // Run async — results stream via events
+    trainingRunner.runTraining(
+      config,
+      (msg) => event.sender.send('training:log', msg),
+      (result) => event.sender.send('training:spec-result', result),
+      (results) => event.sender.send('training:complete', results)
+    ).catch(e => {
+      event.sender.send('training:log', `❌ Fatal error: ${e.message}\n`);
+      event.sender.send('training:complete', []);
+    });
+    return { success: true };
+  });
+
+  ipcMain.handle('training:stop', async () => {
+    trainingRunner.stop();
+    return { success: true };
+  });
+
+  ipcMain.handle('training:status', async () => {
+    return { running: trainingRunner.isRunning() };
+  });
+
+  // Rules Bank
+  ipcMain.handle('rules:list', async () => {
+    return rulesBank.listRules();
+  });
+
+  ipcMain.handle('rules:delete', async (_, id: string) => {
+    rulesBank.removeRule(id);
+    return { success: true };
+  });
+
+  ipcMain.handle('rules:clear', async () => {
+    rulesBank.clearAll();
+    return { success: true };
   });
 }
 

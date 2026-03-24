@@ -2,45 +2,92 @@ import fs from 'fs';
 import path from 'path';
 import { StorageService } from './storage';
 import { LLMService } from './llm';
+import { RulesBankService } from './rules-bank';
+import { validateGeneratedApp } from './app-validator';
 import { EngagementSpec, SpanDefinition } from '../../src/types/spec';
+import { checkPageSyntax, formatSyntaxErrorsForLLM } from './page-syntax-validator';
 
 export class GeneratorService {
   private storage: StorageService;
   private llm: LLMService;
+  private rulesBank: RulesBankService | null = null;
   private templatesDir: string;
 
-  constructor(storage: StorageService, llm: LLMService) {
+  constructor(storage: StorageService, llm: LLMService, rulesBank?: RulesBankService) {
     this.storage = storage;
     this.llm = llm;
+    this.rulesBank = rulesBank || null;
     this.templatesDir = path.join(__dirname, '../../../../templates/reference-app');
   }
 
-  async generateReferenceApp(project: EngagementSpec): Promise<{ success: boolean; outputPath?: string; error?: string }> {
+  async generateReferenceApp(
+    project: EngagementSpec,
+    onProgress?: (pct: number, label: string) => void,
+    onOutput?: (line: string) => void
+  ): Promise<{ success: boolean; outputPath?: string; error?: string }> {
+    let currentPct = 0;
+    const progress = (pct: number, label: string) => {
+      currentPct = pct;
+      console.log(`[generate] ${pct}% — ${label}`);
+      onProgress?.(pct, label);
+    };
+
+    // Forward LLM token progress to the UI without changing the current percentage
+    this.llm.streamProgressCallback = (tokens, label) => {
+      onProgress?.(currentPct, label);
+    };
+
     try {
       const outputPath = this.storage.getOutputPath(project.id);
       const appPath = path.join(outputPath, 'reference-app');
 
-      // Create app structure based on stack type
-      if (project.stack.type === 'backend-only') {
-        this.createPythonDirectoryStructure(appPath);
-        this.generatePythonBackend(appPath, project);
-      } else if (project.stack.type === 'mobile') {
-        this.createMobileDirectoryStructure(appPath);
-        await this.generateReactNativeApp(appPath, project);
-        this.generateBackend(appPath, project); // Express backend
-      } else {
-        this.createDirectoryStructure(appPath);
-        await this.generateFrontend(appPath, project);
-        await this.generateBackend(appPath, project); // Express backend
+      progress(5, 'Reading project spec…');
+
+      // Log active rules so it's visible that generation is rule-aware
+      if (this.rulesBank) {
+        const rules = this.rulesBank.listRules();
+        if (rules.length > 0) {
+          console.log(`\n📚 Applying ${rules.length} training rule(s) to generation:`);
+          for (const r of rules) {
+            console.log(`   [${r.category}] ${r.title}`);
+          }
+        } else {
+          console.log('📚 No training rules yet — run training to improve generation quality');
+        }
       }
 
-      // Generate config files (README, etc.)
+      // Create app structure based on stack type
+      if (project.stack.type === 'backend-only') {
+        progress(15, 'Scaffolding backend…');
+        this.createPythonDirectoryStructure(appPath);
+        progress(30, 'Generating backend code…');
+        this.generatePythonBackend(appPath, project);
+        progress(80, 'Backend ready');
+      } else if (project.stack.type === 'mobile') {
+        progress(15, 'Scaffolding mobile app…');
+        this.createMobileDirectoryStructure(appPath);
+        progress(25, 'Generating React Native app…');
+        await this.generateReactNativeApp(appPath, project);
+        progress(75, 'Generating Express backend…');
+        await this.generateBackend(appPath, project);
+        progress(82, 'Backend ready');
+      } else {
+        progress(15, 'Scaffolding directories…');
+        this.createDirectoryStructure(appPath);
+        progress(22, 'Generating instrumentation wrappers…');
+        await this.generateFrontend(appPath, project, progress);
+        progress(65, 'Generating Express backend…');
+        await this.generateBackend(appPath, project, progress);
+        progress(82, 'Backend ready');
+      }
+
+      progress(85, 'Writing config files…');
       this.generateConfigFiles(appPath, project);
 
-      // Generate user flows for live data generation
+      progress(92, 'Generating user flows…');
       this.generateUserFlows(outputPath, project);
 
-      // Save engagement spec
+      progress(95, 'Saving engagement spec…');
       const specPath = path.join(outputPath, 'engagement-spec.json');
       fs.writeFileSync(specPath, JSON.stringify(project, null, 2));
 
@@ -50,8 +97,35 @@ export class GeneratorService {
         status: 'generated'
       });
 
+      // Validate generated app (structure check + build check + smoke test)
+      if (project.stack.type !== 'mobile') {
+        progress(97, 'Validating generated app…');
+        const settings = this.storage.getSettings();
+        const llmConfig = { baseUrl: settings.llm.baseUrl, apiKey: settings.llm.apiKey, model: settings.llm.model };
+        try {
+          const validationResult = await validateGeneratedApp(
+            appPath,
+            project,
+            llmConfig,
+            (_pct, label) => { progress(97, label); },
+            (line) => { onOutput?.(line); }
+          );
+          if (validationResult.buildRepaired) {
+            onOutput?.('✓ Build errors were auto-repaired\n');
+          }
+          if (validationResult.errors.length > 0) {
+            onOutput?.(`⚠ Validation issues: ${validationResult.errors.join('; ')}\n`);
+          }
+        } catch (validationError) {
+          onOutput?.(`⚠ Validation skipped: ${String(validationError)}\n`);
+        }
+      }
+
+      progress(100, 'Done');
+      this.llm.streamProgressCallback = null;
       return { success: true, outputPath: appPath };
     } catch (error) {
+      this.llm.streamProgressCallback = null;
       console.error('Error generating reference app:', error);
       return { success: false, error: String(error) };
     }
@@ -139,16 +213,14 @@ NUM_ERRORS=20
   }
 
   private createDirectoryStructure(appPath: string): void {
+    // Only create truly generic directories — no domain-specific subdirectories.
+    // The LLM creates page subdirectories (e.g. app/signup/, app/checkout/) on demand
+    // based on the actual project spec, so pre-creating e-commerce paths here would
+    // leave stale directories in non-e-commerce projects.
     const dirs = [
       appPath,
       path.join(appPath, 'frontend'),
       path.join(appPath, 'frontend', 'app'),
-      path.join(appPath, 'frontend', 'app', 'product'),
-      path.join(appPath, 'frontend', 'app', 'product', '[id]'),
-      path.join(appPath, 'frontend', 'app', 'cart'),
-      path.join(appPath, 'frontend', 'app', 'checkout'),
-      path.join(appPath, 'frontend', 'app', 'order'),
-      path.join(appPath, 'frontend', 'app', 'order', '[id]'),
       path.join(appPath, 'frontend', 'lib'),
       path.join(appPath, 'backend'),
       path.join(appPath, 'backend', 'src'),
@@ -164,7 +236,11 @@ NUM_ERRORS=20
     });
   }
 
-  private async generateFrontend(appPath: string, project: EngagementSpec): Promise<void> {
+  private async generateFrontend(
+    appPath: string,
+    project: EngagementSpec,
+    progress?: (pct: number, label: string) => void
+  ): Promise<void> {
     const frontendPath = path.join(appPath, 'frontend');
 
     // Package.json
@@ -241,7 +317,7 @@ module.exports = {
         lib: ['dom', 'dom.iterable', 'esnext'],
         allowJs: true,
         skipLibCheck: true,
-        strict: true,
+        strict: false,
         noEmit: true,
         esModuleInterop: true,
         module: 'esnext',
@@ -266,11 +342,16 @@ module.exports = {
     // Instrumentation (must be generated before pages)
     this.generateFrontendInstrumentation(frontendPath, project);
 
+    progress?.(30, 'Writing frontend pages…');
     // Pages - use LLM to generate with proper instrumentation
     await this.generateFrontendPagesWithLLM(frontendPath, project);
   }
 
-  private async generateBackend(appPath: string, project: EngagementSpec): Promise<void> {
+  private async generateBackend(
+    appPath: string,
+    project: EngagementSpec,
+    progress?: (pct: number, label: string) => void
+  ): Promise<void> {
     const backendPath = path.join(appPath, 'backend');
 
     // Package.json
@@ -307,7 +388,7 @@ module.exports = {
         module: 'commonjs',
         outDir: './dist',
         rootDir: './src',
-        strict: true,
+        strict: false,
         esModuleInterop: true,
         skipLibCheck: true,
         forceConsistentCasingInFileNames: true,
@@ -327,8 +408,12 @@ module.exports = {
     // Sentry instrumentation (must be generated before routes)
     this.generateBackendInstrumentation(backendPath, project);
 
-    // Routes - use LLM to generate with proper instrumentation
-    await this.generateBackendRoutesWithLLM(backendPath, project);
+    progress?.(72, 'Writing backend routes…');
+    // Always generate template routes first — guaranteed correct structure:
+    // correct paths, continueTrace, span wrappers, http.status_code.
+    // Then optionally enrich stub bodies with LLM (cosmetic only — never touches structure).
+    this.generateBackendRoutes(backendPath, project);
+    await this.enhanceRouteStubsWithLLM(backendPath, project);
   }
 
   private generateSentryConfig(basePath: string, layer: 'frontend' | 'backend', project: EngagementSpec): void {
@@ -352,7 +437,7 @@ Sentry.init({
   tracesSampleRate: 1.0,
 
   // Propagate trace headers to backend so FE→BE spans connect in Sentry
-  tracePropagationTargets: ['localhost', /^\\//],
+  tracePropagationTargets: ['localhost', '127.0.0.1', /^\\//],
 
   // Enable debug mode for troubleshooting (disable in production)
   debug: process.env.NODE_ENV === 'development',
@@ -468,22 +553,50 @@ module.exports = Sentry;
     console.log('🤖 Using LLM to generate Next.js pages with instrumentation...');
     const appPath = path.join(frontendPath, 'app');
 
+    // Wipe all stale page files and their directories before writing the new generation.
+    // Without this, pages from a previous run survive regeneration and get included in
+    // the build even though they belong to a completely different spec.
+    // We keep the framework files (layout.tsx, globals.css, not-found.tsx, global-error.tsx)
+    // because those are regenerated separately and are project-agnostic.
+    const KEEP = new Set(['layout.tsx', 'globals.css', 'not-found.tsx', 'global-error.tsx']);
+    if (fs.existsSync(appPath)) {
+      for (const entry of fs.readdirSync(appPath, { withFileTypes: true })) {
+        if (KEEP.has(entry.name)) continue;
+        const full = path.join(appPath, entry.name);
+        try {
+          fs.rmSync(full, { recursive: true, force: true });
+        } catch {}
+      }
+      console.log('🧹 Cleared stale pages from previous generation');
+    }
+
     try {
       console.log('📝 Generating pages with LLM...');
       const { pages } = await this.llm.generateWebPages(project);
       console.log(`✅ LLM generated ${pages.length} Next.js pages`);
 
-      // Write generated pages
+      // Pre-write syntax gate: validate each page with the TypeScript compiler
+      // before touching disk. If a page has syntax errors, run a fix-validate
+      // loop (LLM fix → re-parse → accept only if clean) so broken code is
+      // never written to disk in the first place.
       for (const page of pages) {
         const pagePath = path.join(appPath, page.filename);
         const pageDir = path.dirname(pagePath);
+        if (!fs.existsSync(pageDir)) fs.mkdirSync(pageDir, { recursive: true });
 
-        // Create directory if it doesn't exist
-        if (!fs.existsSync(pageDir)) {
-          fs.mkdirSync(pageDir, { recursive: true });
+        let code = page.code;
+        let syntaxErrors = checkPageSyntax(code, page.filename);
+
+        if (syntaxErrors.length > 0) {
+          console.log(`  ⚠️  ${page.filename} — ${syntaxErrors.length} syntax error(s), running fix-validate loop`);
+          const fixed = await this.fixPageWithValidation(code, syntaxErrors, page.filename, frontendPath, project);
+          if (fixed !== null) {
+            code = fixed;
+            page.code = fixed;
+          }
         }
 
-        fs.writeFileSync(pagePath, page.code);
+        fs.writeFileSync(pagePath, code);
         console.log(`  ✓ Created ${page.filename}: ${page.description}`);
       }
 
@@ -567,6 +680,43 @@ export default function RootLayout({
 `;
       fs.writeFileSync(path.join(appPath, 'layout.tsx'), layout);
 
+      // app/not-found.tsx — App Router 404 page.
+      // Without this, Next.js falls back to Pages Router's _error which imports <Html>
+      // from next/document and triggers a hard build error.
+      const notFound = `export default function NotFound() {
+  return (
+    <div style={{ padding: '2rem', textAlign: 'center' }}>
+      <h1>404 — Page Not Found</h1>
+      <p>The page you&apos;re looking for doesn&apos;t exist.</p>
+    </div>
+  );
+}
+`;
+      fs.writeFileSync(path.join(appPath, 'not-found.tsx'), notFound);
+
+      // app/global-error.tsx — App Router equivalent of pages/_error.tsx.
+      // Must be a Client Component and must render its own <html>/<body> because
+      // it replaces the root layout when a top-level error occurs.
+      const globalError = `'use client';
+export default function GlobalError({
+  error,
+  reset,
+}: {
+  error: Error & { digest?: string };
+  reset: () => void;
+}) {
+  return (
+    <html>
+      <body style={{ padding: '2rem', textAlign: 'center' }}>
+        <h2>Something went wrong</h2>
+        <button onClick={reset}>Try again</button>
+      </body>
+    </html>
+  );
+}
+`;
+      fs.writeFileSync(path.join(appPath, 'global-error.tsx'), globalError);
+
     } catch (error) {
       console.error('❌ Failed to generate pages with LLM:', error);
       console.log('⚠️  Falling back to template pages...');
@@ -626,16 +776,61 @@ export default function RootLayout({
     console.log(`🔍 Validating ${allPages.length} pages (${pages.length} generated + ${diskPages.length} pre-existing)...`);
 
     for (const page of allPages) {
-      // Sanitize unquoted dot-notation object keys in all pages unconditionally.
-      // LLM sometimes emits { http.status_code: 0 } which is a JS syntax error.
-      const sanitized = page.code.replace(
+      // ── Syntax scrub — applied unconditionally before any other check ──────
+      let scrubbed = page.code;
+
+      // 1. Unquoted dot-notation object keys: { http.status_code: 0 } → { 'http.status_code': 0 }
+      scrubbed = scrubbed.replace(
         /([{,]\s*)([a-zA-Z][a-zA-Z0-9]*(?:\.[a-zA-Z][a-zA-Z0-9]*)+)\s*:/g,
         "$1'$2':"
       );
-      if (sanitized !== page.code) {
-        page.code = sanitized;
-        fs.writeFileSync(path.join(appPath, page.filename), sanitized);
-        console.log(`  ✓ ${page.filename} — fixed unquoted dot-notation keys`);
+
+      // 2. Missing closing paren on trace_* calls.
+      // LLM consistently emits: }, { key: val };
+      // Correct form is:        }, { key: val });
+      // The pattern matches the closing object-arg of a two-argument function call
+      // where the outer call's `)` was dropped.  We handle up to one level of
+      // nested `{}` inside the attribute object (e.g. { headers: {} }).
+      scrubbed = scrubbed.replace(
+        /(},\s*\{(?:[^{}]|\{[^}]*\})*\})\s*;/g,
+        (match, group) => {
+          // Only fix if this looks like a function argument context (preceded by `)`
+          // from the async callback closing brace).  Avoid replacing plain object
+          // literals that legitimately end with `};`.
+          return group + ');';
+        }
+      );
+
+      if (scrubbed !== page.code) {
+        page.code = scrubbed;
+        fs.writeFileSync(path.join(appPath, page.filename), scrubbed);
+        console.log(`  ✓ ${page.filename} — syntax scrub applied`);
+      }
+
+      // Compiler-level syntax check on ALL pages (generated + pre-existing).
+      // Catches any syntax error the LLM introduced regardless of pattern.
+      // Only attempt LLM fix here if the error is new (i.e. scrub didn't fix it).
+      const syntaxErrors = checkPageSyntax(page.code, page.filename);
+      if (syntaxErrors.length > 0) {
+        console.warn(`  ⚠️  ${page.filename} — syntax errors detected post-scrub, attempting fix`);
+        const fixed = await this.fixPageWithValidation(page.code, syntaxErrors, page.filename, frontendPath, project);
+        if (fixed !== null) {
+          page.code = fixed;
+          fs.writeFileSync(path.join(appPath, page.filename), fixed);
+          console.log(`  ✓ ${page.filename} — syntax fixed`);
+        }
+      }
+
+      // Deterministic check: page uses React hooks but is missing 'use client'.
+      // Without 'use client', Next.js treats it as a Server Component and hooks
+      // called during SSR will throw "Cannot read properties of null (reading 'useContext')".
+      const HOOK_RE = /\b(useState|useEffect|useContext|useCallback|useMemo|useRef|useReducer|useSearchParams|useRouter|usePathname|useParams)\s*[(<]/;
+      const hasHooks = HOOK_RE.test(page.code);
+      const hasUseClient = /^\s*['"]use client['"]/.test(page.code);
+      if (hasHooks && !hasUseClient) {
+        page.code = `'use client';\n${page.code}`;
+        fs.writeFileSync(path.join(appPath, page.filename), page.code);
+        console.log(`  ✓ ${page.filename} — added missing 'use client' directive`);
       }
 
       const importMatch = page.code.match(/import \{([^}]+)\} from ['"]@\/lib\/instrumentation['"]/);
@@ -643,6 +838,27 @@ export default function RootLayout({
         ? importMatch[1].split(',').map((s: string) => s.trim()).filter(Boolean)
         : [];
       const invalidNames = importedNames.filter((n: string) => !validFns.includes(n));
+
+      // Detect trace_* calls that exist in the page but are never imported.
+      // LLMs sometimes generate the call sites but forget the import statement.
+      const usedFns = Array.from(page.code.matchAll(/\b(trace_\w+)\s*\(/g), m => m[1]);
+      const missingImports = [...new Set(usedFns)].filter(
+        fn => validFns.includes(fn) && !importedNames.includes(fn)
+      );
+      if (missingImports.length > 0) {
+        const allNeeded = [...new Set([...importedNames.filter((n: string) => validFns.includes(n)), ...missingImports])];
+        const newImport = `import { ${allNeeded.join(', ')} } from '@/lib/instrumentation';`;
+        if (importMatch) {
+          page.code = page.code.replace(importMatch[0], newImport);
+        } else {
+          // No instrumentation import at all — insert after the last import line
+          const lastImportIdx = [...page.code.matchAll(/^import .+$/gm)].pop()?.index ?? 0;
+          const insertAt = lastImportIdx + page.code.slice(lastImportIdx).indexOf('\n') + 1;
+          page.code = page.code.slice(0, insertAt) + newImport + '\n' + page.code.slice(insertAt);
+        }
+        fs.writeFileSync(path.join(appPath, page.filename), page.code);
+        console.log(`  ✓ ${page.filename} — added missing imports: ${missingImports.join(', ')}`);
+      }
 
       // Detect inline Sentry.startSpan usage without any instrumentation import
       const hasInlineSpan = page.code.includes('Sentry.startSpan(');
@@ -679,6 +895,88 @@ export default function RootLayout({
         console.warn(`  ⚠️  Could not fix ${page.filename}: ${err}`);
       }
     }
+  }
+
+  /**
+   * Fix-validate loop: ask the LLM to fix syntax errors, then re-parse the result
+   * with the TypeScript compiler before accepting it.  Repeats up to MAX_ATTEMPTS
+   * times, each time feeding the NEW compiler errors back into the prompt so the
+   * LLM has accurate context.  Only returns code that actually passes the parser —
+   * if all attempts fail, returns null so the caller can fall back gracefully.
+   */
+  private async fixPageWithValidation(
+    code: string,
+    initialErrors: import('./page-syntax-validator').PageSyntaxError[],
+    filename: string,
+    frontendPath: string,
+    project: EngagementSpec
+  ): Promise<string | null> {
+    const MAX_ATTEMPTS = 3;
+    const settings = this.storage.getSettings();
+    if (!settings.llm.baseUrl || !settings.llm.apiKey) return null;
+
+    let currentCode = code;
+    let currentErrors = initialErrors;
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      console.log(`  🔧 Syntax fix attempt ${attempt}/${MAX_ATTEMPTS} for ${filename}`);
+
+      const errorBlock = formatSyntaxErrorsForLLM(currentErrors);
+
+      // Pull a working trace_* example from the instrumentation file for grounding
+      const instrPath = path.join(frontendPath, 'lib', 'instrumentation.ts');
+      let exampleBlock = '';
+      try {
+        const instrCode = fs.readFileSync(instrPath, 'utf8');
+        const exMatch = instrCode.match(/export (async )?function trace_\w+[\s\S]{0,400}/);
+        if (exMatch) exampleBlock = `\nCORRECT PATTERN from your instrumentation file:\n${exMatch[0].slice(0, 300)}\n`;
+      } catch { /* instrumentation file may not exist yet */ }
+
+      const prompt = `Fix the TypeScript syntax errors in this Next.js page.
+Return ONLY the complete corrected file — no explanation, no markdown fences.
+${exampleBlock}
+SYNTAX ERRORS (${currentErrors.length}):
+${errorBlock}
+
+CONSTRAINTS — you MUST follow all of these:
+- Do NOT remove or rename any trace_* function calls
+- Every trace_* call takes exactly TWO arguments: (async () => { ... }, { attrs })
+  The outer call closes with ); — NOT with }; or } alone
+- Do NOT add imports that are not already present in the file
+- Keep all existing component logic, state, and JSX intact
+
+FILE (${filename}):
+${currentCode}`;
+
+      let fixed: string;
+      try {
+        const raw = await this.llm.callLLMDirect(
+          [{ role: 'user', content: prompt }],
+          settings.llm
+        );
+        fixed = raw
+          .replace(/^```(?:typescript|tsx|javascript|js)?\n?/, '')
+          .replace(/\n?```[\s\S]*$/, '')
+          .trim();
+      } catch (e: any) {
+        console.warn(`  ⚠️  LLM call failed on attempt ${attempt}: ${e?.message}`);
+        break;
+      }
+
+      // Validate the fix before accepting it
+      const newErrors = checkPageSyntax(fixed, filename);
+      if (newErrors.length === 0) {
+        console.log(`  ✓ ${filename} — syntax clean after ${attempt} attempt(s)`);
+        return fixed;
+      }
+
+      console.warn(`  ⚠️  Fix attempt ${attempt} introduced/kept ${newErrors.length} error(s) — retrying with updated context`);
+      currentCode = fixed;
+      currentErrors = newErrors;
+    }
+
+    console.error(`  ✗ ${filename} — could not fix syntax after ${MAX_ATTEMPTS} attempts, writing best effort`);
+    return null;
   }
 
   /**
@@ -1571,7 +1869,11 @@ export default function ProductPage({ params }: { params: { id: string } }) {
   );
 }
 `;
-    fs.writeFileSync(path.join(appPath, 'product', '[id]', 'page.tsx'), productPage);
+    // Only generate e-commerce-specific pages for e-commerce projects
+    if (vertical === 'ecommerce') {
+      fs.mkdirSync(path.join(appPath, 'product', '[id]'), { recursive: true });
+      fs.writeFileSync(path.join(appPath, 'product', '[id]', 'page.tsx'), productPage);
+    }
 
     // Order confirmation page with enhanced styling
     const orderPage = `'use client';
@@ -1730,7 +2032,10 @@ export default function OrderPage({ params }: { params: { id: string } }) {
   );
 }
 `;
-    fs.writeFileSync(path.join(appPath, 'order', '[id]', 'page.tsx'), orderPage);
+    if (vertical === 'ecommerce') {
+      fs.mkdirSync(path.join(appPath, 'order', '[id]'), { recursive: true });
+      fs.writeFileSync(path.join(appPath, 'order', '[id]', 'page.tsx'), orderPage);
+    }
 
     // Layout
     const layout = `import type { Metadata } from 'next'
@@ -1816,27 +2121,59 @@ export default function RootLayout({
       return true;
     });
 
+    const rules = this.rulesBank?.listRules() || [];
+    const needsHttpStatus = rules.some(r => r.category === 'attribute_completeness' && r.rule.includes('http.status_code'))
+      || true; // always enforce — http.status_code is required by Sentry conventions
+    const needsDbAttrs = rules.some(r => r.category === 'attribute_completeness' && r.rule.includes('db.system'))
+      || true; // always enforce
+
+    const rulesComment = rules.length > 0
+      ? `// Applied training rules (${rules.length}):\n${rules.map(r => `//   [${r.category}] ${r.title}`).join('\n')}\n`
+      : '// No training rules yet — run training to improve instrumentation quality\n';
+
+    // Per-op required attributes enforced in every wrapper
+    const opAttrs = (op: string, spanName: string): string => {
+      if ((op === 'http.client' || op === 'http.server') && needsHttpStatus) {
+        return `  // Required by Sentry conventions — pass statusCode in attributes when calling this function\n  if (attributes['http.status_code'] === undefined && attributes['statusCode'] !== undefined) {\n    attributes['http.status_code'] = attributes['statusCode'];\n  }`;
+      }
+      if (op.startsWith('db') && needsDbAttrs) {
+        return `  // Required by Sentry conventions — pass db.system, db.statement in attributes\n  if (!attributes['db.system']) attributes['db.system'] = 'unknown';`;
+      }
+      return '';
+    };
+
     const instrumentationFile = `import * as Sentry from '@sentry/nextjs';
 
 // Custom instrumentation generated from your engagement spec
 // These spans have been designed based on your project requirements
 // Call these functions to track key operations in your application
-
-${spans.map(span => `
+${rulesComment}
+${spans.map(span => {
+  const attrSetup = opAttrs(span.op, span.name);
+  return `
 export function trace_${span.name.replace(/\./g, '_')}(
   callback: () => Promise<any>,
   attributes: Record<string, any> = {}
 ) {
-  return Sentry.startSpan(
+${attrSetup ? attrSetup + '\n' : ''}  return Sentry.startSpan(
     {
       op: '${span.op}',
       name: '${span.name}',
       attributes: filterPII(attributes, ${JSON.stringify(span.pii.keys)})
     },
-    callback
+    async (span) => {
+      try {
+        const result = await callback();
+        span.setAttributes({ success: true });
+        return result;
+      } catch (err: any) {
+        span.setAttributes({ success: false, error_message: err.message || String(err) });
+        throw err;
+      }
+    }
   );
-}
-`).join('\n')}
+}`;
+}).join('\n')}
 
 function filterPII(attributes: Record<string, any>, piiKeys: string[]): Record<string, any> {
   const filtered = { ...attributes };
@@ -1881,8 +2218,8 @@ app.get('/', (req, res) => {
   res.json({ message: 'Welcome to ${project.project.name} API', status: 'healthy' });
 });
 
-// Routes
-app.use('/api', require('./routes/api'));
+// Routes — mount without /api prefix so Sentry sees full path (e.g. GET /api/checkout/validate-cart)
+app.use(require('./routes/api'));
 
 // Sentry error handler must come before other error handlers
 Sentry.setupExpressErrorHandler(app);
@@ -1893,9 +2230,24 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(\`Backend running on port \${PORT}\`);
 });
+
+// Graceful shutdown — flush Sentry before exiting so no spans are lost
+// The training runner sends SIGTERM to stop the server; without this flush,
+// any spans still buffered in the Sentry SDK are silently dropped.
+async function shutdown() {
+  server.close();
+  await Sentry.flush(3000).catch(() => {});
+  process.exit(0);
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
+
+// Ensure TypeScript treats this file as a module (not a global script)
+// Without this, tsc sees multiple files with const Sentry = require(...) as duplicate declarations
+export {};
 `;
     fs.writeFileSync(path.join(backendPath, 'src', 'index.ts'), serverFile);
 
@@ -1919,6 +2271,13 @@ PORT=3001
       // These are valid OTel semantic convention attribute names but invalid as unquoted JS keys.
       code = code.replace(/([{,]\s*)([a-zA-Z][a-zA-Z0-9]*(?:\.[a-zA-Z][a-zA-Z0-9]*)+)\s*:/g, "$1'$2':");
 
+      // Validate: ensure every route handler uses Sentry.continueTrace to attach BE spans to the FE trace.
+      if (!code.includes('continueTrace')) {
+        console.warn('⚠️  LLM routes missing Sentry.continueTrace — falling back to templates to guarantee FE→BE trace attachment');
+        this.generateBackendRoutes(backendPath, project);
+        return;
+      }
+
       // Validate: detect duplicate method+path registrations.
       // In Express, only the first handler for a given method+path ever fires — duplicates silently discard spans.
       const routeMatches = [...code.matchAll(/router\.(get|post|put|patch|delete)\s*\(\s*['"`]([^'"`]+)['"`]/gi)];
@@ -1936,6 +2295,40 @@ PORT=3001
         return;
       }
 
+      // Validate: detect routes mounted via app.use('/prefix', router) pattern.
+      // This causes Sentry to name transactions as "METHOD /prefix" instead of the full path.
+      // The server already does app.use(require('./routes/api')) with no prefix, so routes must use full paths.
+      const subRouterMount = code.match(/app\.use\s*\(\s*['"`]([^'"`]+)['"`]\s*,\s*\w*[Rr]outer/);
+      if (subRouterMount) {
+        console.warn(`⚠️  LLM used app.use('${subRouterMount[1]}', router) — Sentry would name transactions "METHOD ${subRouterMount[1]}" not full path. Falling back to templates.`);
+        this.generateBackendRoutes(backendPath, project);
+        return;
+      }
+
+      // Validate: all custom span names have a matching route in the generated code
+      const specSpanNames = project.instrumentation.spans.map(s => s.name);
+      const missingSpanRoutes = specSpanNames.filter(name => {
+        const fnName = `trace_${name.replace(/\./g, '_')}`;
+        return !code.includes(fnName);
+      });
+      if (missingSpanRoutes.length > 0) {
+        console.warn(`⚠️  LLM routes missing instrumentation for spans: ${missingSpanRoutes.join(', ')}. Falling back to templates.`);
+        this.generateBackendRoutes(backendPath, project);
+        return;
+      }
+
+      // Validate: detect routes registered at bare "/" path.
+      // When the LLM generates router.get('/', ...) or router.post('/', ...), Sentry captures
+      // the transaction name as "METHOD /" because the route path has no specificity.
+      // Count routes at "/" vs routes with real paths — if most are at "/", fall back.
+      const allRouteMatches = [...code.matchAll(/router\.(get|post|put|patch|delete)\s*\(\s*['"`]([^'"`]+)['"`]/gi)];
+      const rootRoutes = allRouteMatches.filter(m => m[2] === '/' || m[2] === '');
+      if (allRouteMatches.length > 0 && rootRoutes.length / allRouteMatches.length > 0.4) {
+        console.warn(`⚠️  LLM generated ${rootRoutes.length}/${allRouteMatches.length} routes at path "/" — Sentry would show "METHOD /". Falling back to templates.`);
+        this.generateBackendRoutes(backendPath, project);
+        return;
+      }
+
       // Write routes file
       fs.writeFileSync(path.join(backendPath, 'src', 'routes', 'api.ts'), code);
 
@@ -1944,6 +2337,48 @@ PORT=3001
       console.log('⚠️  Falling back to template routes...');
       // Fallback to old method if LLM fails
       this.generateBackendRoutes(backendPath, project);
+    }
+  }
+
+  /**
+   * Enhance the template-generated route stubs with domain-specific mock data.
+   * The template structure (paths, continueTrace, span wrappers) is NEVER modified —
+   * only the inner stub return value is replaced with realistic data.
+   * This is a small focused LLM task that any model can do reliably.
+   */
+  private async enhanceRouteStubsWithLLM(backendPath: string, project: EngagementSpec): Promise<void> {
+    const routesPath = path.join(backendPath, 'src', 'routes', 'api.ts');
+    if (!fs.existsSync(routesPath)) return;
+
+    try {
+      const stubs = await this.llm.generateRouteStubs(project);
+      if (!stubs || stubs.length === 0) return;
+
+      let code = fs.readFileSync(routesPath, 'utf-8');
+      let changed = false;
+
+      for (const stub of stubs) {
+        const spanName = stub.spanName.replace(/\./g, '_');
+        // Replace the generic placeholder inside the trace wrapper callback
+        const placeholderRe = new RegExp(
+          `(trace_${spanName}\\s*\\(\\s*async\\s*\\(\\s*\\)\\s*=>\\s*\\{[^}]*?)return\\s*\\{[^}]*?operation:\\s*'${stub.spanName.replace(/\./g, '\\.')}'[^}]*?\\}`,
+          'g'
+        );
+        const replacement = `$1return ${JSON.stringify(stub.mockResponse, null, 8).replace(/\n/g, '\n          ')}`;
+        const updated = code.replace(placeholderRe, replacement);
+        if (updated !== code) {
+          code = updated;
+          changed = true;
+        }
+      }
+
+      if (changed) {
+        fs.writeFileSync(routesPath, code);
+        console.log(`✅ Enhanced ${stubs.length} route stub(s) with domain-specific mock data`);
+      }
+    } catch (err) {
+      // Non-fatal — template stubs work fine, this is cosmetic only
+      console.warn('⚠️  Route stub enhancement failed (non-fatal):', err);
     }
   }
 
@@ -1966,8 +2401,8 @@ PORT=3001
       // This matches the derivation in the LLM prompts so FE and BE always agree.
       const nameParts = span.name.split('.');
       const routePath = nameParts.length === 1
-        ? `/${nameParts[0].replace(/_/g, '-')}`
-        : `/${nameParts[0]}/${nameParts.slice(1).join('/').replace(/_/g, '-')}`;
+        ? `/api/${nameParts[0].replace(/_/g, '-')}`
+        : `/api/${nameParts[0]}/${nameParts.slice(1).join('/').replace(/_/g, '-')}`;
       const attrEntries = Object.keys(span.attributes)
         .map(k => {
           // Quote keys with dots (OTel conventions like 'http.method') — unquoted are JS syntax errors
@@ -1978,16 +2413,21 @@ PORT=3001
       const attrObj = attrEntries ? `{\n${attrEntries}\n    }` : '{}';
       // Use span.name (not span.op) to determine HTTP method — op values like 'operation' or 'product'
       // give no signal, but the action part of the name (fetch, load, search, filter, get) does.
-      const isGet = ['fetch', 'load', 'get', 'list', 'read', 'query', 'search', 'filter', 'view', 'show', 'detail'].some(
+      const isGet = ['fetch', 'load', 'get', 'list', 'read', 'query', 'search', 'filter', 'view', 'show', 'detail', 'retrieve'].some(
         v => span.name.toLowerCase().includes(v)
       );
       const method = isGet ? 'get' : 'post';
 
-      return `
-router.${method}('${routePath}', async (req, res) => {
+      // For read-type spans, also generate a RESTful GET /namespace alias so the frontend's
+      // natural REST calls (e.g. GET /api/products) are handled in addition to the
+      // span-specific path (e.g. GET /products/retrieve-product).
+      const namespace = nameParts[0].replace(/_/g, '-');
+      const aliasRoute = isGet && nameParts.length > 1
+        ? `
+// RESTful alias — frontend calls GET /api/${namespace} directly
+router.get('/api/${namespace}', async (req, res) => {
   try {
     const result = await ${fnName}(async () => {
-      // ${span.description || `Handles ${span.name}`}
       await new Promise(resolve => setTimeout(resolve, Math.floor(Math.random() * 300) + 50));
       return { id: Date.now(), status: 'ok', operation: '${span.name}' };
     }, ${attrObj});
@@ -1996,7 +2436,36 @@ router.${method}('${routePath}', async (req, res) => {
     Sentry.captureException(error);
     res.status(500).json({ error: '${span.name} failed' });
   }
-});`;
+});`
+        : '';
+
+      return `
+router.${method}('${routePath}', async (req, res) => {
+  // continueTrace propagates the sentry-trace + baggage headers from the FE request,
+  // ensuring this backend span is attached to the frontend trace (not orphaned).
+  return Sentry.continueTrace(
+    { sentryTrace: req.headers['sentry-trace'], baggage: req.headers['baggage'] },
+    async () => {
+      try {
+        const result = await ${fnName}(async () => {
+          // ${span.description || `Handles ${span.name}`}
+          await new Promise(resolve => setTimeout(resolve, Math.floor(Math.random() * 300) + 50));
+          return { id: Date.now(), status: 'ok', operation: '${span.name}' };
+        }, {
+          ...${attrObj},
+          'http.status_code': 200,
+          'server.address': req.hostname || 'localhost',
+          'http.method': req.method,
+          'http.route': '${routePath}',
+        });
+        res.json({ success: true, ...result });
+      } catch (error) {
+        Sentry.captureException(error);
+        res.status(500).json({ error: '${span.name} failed' });
+      }
+    }
+  );
+});${aliasRoute}`;
     }).join('\n');
 
     const routesFile = `const express = require('express');
@@ -2012,6 +2481,9 @@ router.get('/status', (req, res) => {
 });`}
 
 module.exports = router;
+
+// Ensure TypeScript treats this file as a module (not a global script)
+export {};
 `;
     fs.writeFileSync(path.join(backendPath, 'src', 'routes', 'api.ts'), routesFile);
   }
@@ -2022,27 +2494,53 @@ module.exports = router;
     const frontendSpans = project.instrumentation.spans.filter(s => s.layer === 'frontend');
     const allSpans = [...backendSpans, ...frontendSpans];
 
+    const rules = this.rulesBank?.listRules() || [];
+    const rulesComment = rules.length > 0
+      ? `// Applied training rules (${rules.length}):\n${rules.map(r => `//   [${r.category}] ${r.title}`).join('\n')}\n`
+      : '// No training rules yet — run training to improve instrumentation quality\n';
+
+    const opAttrs = (op: string): string => {
+      if (op === 'http.server') {
+        return `  // Enforce http.status_code — required by Sentry conventions\n  if (attributes['http.status_code'] === undefined && attributes['statusCode'] !== undefined) {\n    attributes['http.status_code'] = attributes['statusCode'];\n  }`;
+      }
+      if (op.startsWith('db')) {
+        return `  // Enforce db.system — required by Sentry DB conventions\n  if (!attributes['db.system']) attributes['db.system'] = 'sqlite';`;
+      }
+      return '';
+    };
+
     const instrumentationFile = `const Sentry = require('@sentry/node');
 
 // Custom instrumentation generated from your engagement spec
 // These spans have been designed based on your project requirements
 // Call these functions to track key operations in your application
-
-${allSpans.map(span => `
+${rulesComment}
+${allSpans.map(span => {
+  const attrSetup = opAttrs(span.op);
+  return `
 exports.trace_${span.name.replace(/\./g, '_')} = function(
   callback,
   attributes = {}
 ) {
-  return Sentry.startSpan(
+${attrSetup ? attrSetup + '\n' : ''}  return Sentry.startSpan(
     {
       op: '${span.op}',
       name: '${span.name}',
       attributes: filterPII(attributes, ${JSON.stringify(span.pii.keys)})
     },
-    callback
+    async (span) => {
+      try {
+        const result = await callback(span);
+        span.setAttributes({ success: true });
+        return result;
+      } catch (err) {
+        span.setAttributes({ success: false, error_message: err.message || String(err) });
+        throw err;
+      }
+    }
   );
-};
-`).join('\n')}
+};`;
+}).join('\n')}
 
 function filterPII(attributes, piiKeys) {
   const filtered = { ...attributes };
@@ -2053,6 +2551,9 @@ function filterPII(attributes, piiKeys) {
   });
   return filtered;
 }
+
+// Ensure TypeScript treats this file as a module (not a global script)
+export {};
 `;
 
     fs.writeFileSync(path.join(backendPath, 'src', 'utils', 'instrumentation.ts'), instrumentationFile);

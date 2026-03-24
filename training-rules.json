@@ -1,0 +1,1538 @@
+[
+  {
+    "category": "custom_spans",
+    "title": "Generate flows that explicitly trigger each custom span",
+    "rule": "Each custom span in the spec MUST be triggered by at least one user flow. Do not assume a span will be called during normal page load — create explicit flows that navigate to the page and interact with the UI to trigger the span. Spans that are commonly missed: checkout.validate_cart, checkout.process_payment, order.create. (also seen in: training-ecommerce) (also seen in: training-fintech)",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "flows"
+    ],
+    "id": "rule-1773771747555-3mos",
+    "createdAt": "2026-03-17T18:22:27.555Z",
+    "timesApplied": 2
+  },
+  {
+    "category": "span_gaps",
+    "title": "Parent span duration must be accounted for by child spans",
+    "rule": "When a parent span (e.g. GET /cart) has a much longer duration than the sum of its children, add intermediate child spans to cover the gap. Common causes: database connection setup, external API wait times, serialization. Always wrap these in Sentry.startSpan(). (also seen in: training-ecommerce) (also seen in: training-fintech)",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "generation",
+      "instrumentation"
+    ],
+    "id": "rule-1773771747555-td3a",
+    "createdAt": "2026-03-17T18:22:27.555Z",
+    "timesApplied": 2
+  },
+  {
+    "category": "orphan_spans",
+    "title": "No direct api_call steps after page navigation",
+    "rule": "Never add api_call steps that fire after waitUntil:networkidle2. Instead, let page navigation trigger backend calls naturally within the active pageload transaction. Direct api_call steps after full page load cause orphan spans because the pageload transaction has already closed. (also seen in: training-ecommerce)",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "flows"
+    ],
+    "id": "rule-1773798369632-1f65",
+    "createdAt": "2026-03-18T01:46:09.632Z",
+    "timesApplied": 1
+  },
+  {
+    "category": "span_timing",
+    "title": "Child spans must be created inside the parent Sentry.startSpan callback",
+    "rule": "Every child span must be started inside the parent span's callback closure, never after awaiting the parent. Correct pattern: Sentry.startSpan({ name: \"parent\" }, async () => { await Sentry.startSpan({ name: \"child\" }, ...) }). Creating spans outside their parent's callback causes child timestamps to fall outside parent time bounds. (also seen in: training-ecommerce) (also seen in: training-fintech)",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "generation",
+      "instrumentation"
+    ],
+    "id": "rule-1773805190769-wlk5",
+    "createdAt": "2026-03-18T03:39:50.769Z",
+    "timesApplied": 2
+  },
+  {
+    "category": "span_naming",
+    "title": "HTTP spans must use \"METHOD /parameterized-route\" format in description",
+    "rule": "All http.client and http.server span descriptions must follow the format \"GET /api/users/:id\" — the HTTP method followed by a parameterized route pattern. Never use the resolved URL with actual IDs. The Sentry Express integration captures this automatically via expressIntegration(); for manual http.client spans set the description explicitly. (also seen in: training-ecommerce) (also seen in: training-fintech)",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "generation",
+      "instrumentation"
+    ],
+    "id": "rule-1773805190771-8mra",
+    "createdAt": "2026-03-18T03:39:50.771Z",
+    "timesApplied": 2
+  },
+  {
+    "category": "span_naming",
+    "title": "Register Express routes with full /api/ prefix to get correct transaction names",
+    "rule": "Express routes must be registered at the app level with the full path (app.get(\"/api/users\", ...)) not via a sub-router mounted at \"/api\" with bare paths (\"/users\"). The Sentry Express integration captures the mounted path as the transaction name — using app.use(\"/api\", router) with router.get(\"/users\") results in \"GET /\" transaction names instead of \"GET /api/users\". (also seen in: training-ecommerce)",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "generation"
+    ],
+    "id": "rule-1773805190772-ob9n",
+    "createdAt": "2026-03-18T03:39:50.772Z",
+    "timesApplied": 1
+  },
+  {
+    "category": "span_naming",
+    "title": "Span op values must follow Sentry semantic conventions",
+    "rule": "The \"op\" field of every span must use a Sentry semantic convention value: http.client, http.server, db, db.query, cache.get, cache.set, ui.render, function, task, rpc, graphql. Custom op values like \"api-call\", \"database\", or \"render\" break Sentry's built-in dashboards and performance views. (also seen in: training-ecommerce)",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "generation",
+      "instrumentation"
+    ],
+    "id": "rule-1773805190774-q277",
+    "createdAt": "2026-03-18T03:39:50.774Z",
+    "timesApplied": 1
+  },
+  {
+    "category": "attribute_completeness",
+    "title": "Every HTTP span must include http.status_code",
+    "rule": "Both http.client and http.server spans must set http.status_code so traces can be filtered by 2xx/4xx/5xx in Sentry. For Express: span.setAttributes({ \"http.status_code\": res.statusCode, \"http.method\": req.method, \"http.route\": req.route?.path }). For fetch() on the frontend: span.setAttributes({ \"http.status_code\": response.status }). The Sentry SDK may add this automatically if you use the httpIntegration(). (also seen in: training-ecommerce) (also seen in: training-fintech)",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "generation",
+      "instrumentation"
+    ],
+    "id": "rule-1773805190776-4ozy",
+    "createdAt": "2026-03-18T03:39:50.776Z",
+    "timesApplied": 2
+  },
+  {
+    "category": "transaction_completeness",
+    "title": "Backend must honor frontend sampling decision via sentry-trace header",
+    "rule": "The backend must NOT make an independent sampling decision. It must read the sentry-trace and baggage headers from the incoming request and use Sentry.continueTrace() to propagate the frontend's sampling decision. If tracesSampleRate is set on the backend independently, it may conflict with the frontend rate and produce partial traces. (also seen in: training-ecommerce) (also seen in: training-fintech)",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "generation",
+      "instrumentation"
+    ],
+    "id": "rule-1773805190778-kaqy",
+    "createdAt": "2026-03-18T03:39:50.778Z",
+    "timesApplied": 2
+  },
+  {
+    "category": "missing_spans|transaction_completeness|custom_spans",
+    "title": "Add missing spans to checkout flow",
+    "rule": "Ensure that the following spans are added: checkout.validate_cart, checkout.process_payment, order.create. Use Sentry semantic conventions for naming.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773805202350-sv3n",
+    "createdAt": "2026-03-18T03:40:02.350Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "incomplete_attributes|attribute_completeness|http_spans",
+    "title": "Add missing status_code attribute to HTTP spans",
+    "rule": "For all HTTP spans, ensure the following attribute is set: span.setAttributes({ 'http.status_code': res.statusCode });",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773805202354-mod0",
+    "createdAt": "2026-03-18T03:40:02.354Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "incomplete_attributes|attribute_completeness|http_spans",
+    "title": "Add missing server address and host attributes to HTTP spans",
+    "rule": "For all HTTP spans, ensure the following attributes are set: span.setAttributes({ 'server.address': req.connection.remoteAddress, 'http.host': req.headers.host });",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773805202355-rktx",
+    "createdAt": "2026-03-18T03:40:02.355Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "incorrect_span_naming|span_naming|fe_spans",
+    "title": "Use standard op values for browser spans",
+    "rule": "Rename spans with non-standard op values to use Sentry semantic conventions: Rename 'browser.domContentLoadedEvent' to 'ui.domContentLoaded', 'browser.loadEvent' to 'ui.pageLoad', and 'browser.connect' to 'network.request'.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773805202356-8q3x",
+    "createdAt": "2026-03-18T03:40:02.356Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "attribute_completeness",
+    "title": "DB spans must include db.system, db.name, and db.statement",
+    "rule": "Every database span must set: db.system (e.g. \"postgresql\", \"mysql\", \"sqlite\", \"mongodb\"), db.name (database name), and either db.statement (sanitized SQL) or db.operation (e.g. \"SELECT\", \"INSERT\"). Without these, Sentry's Queries view cannot identify which database or query is slow. (also seen in: training-ecommerce)",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "generation",
+      "instrumentation"
+    ],
+    "id": "rule-1773805547728-89y6",
+    "createdAt": "2026-03-18T03:45:47.728Z",
+    "timesApplied": 1
+  },
+  {
+    "category": "orphan_spans|fe_be_connection|custom_spans|widget_data|span_gaps|span_timing|span_naming|attribute_completeness|transaction_completeness|general",
+    "title": "Orphan spans detected in UI traces",
+    "rule": "Ensure all spans are child of a transaction. Check for missing `sentry-trace` header propagation in frontend requests.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "generation",
+      "flows"
+    ],
+    "id": "rule-1773805561521-s2zu",
+    "createdAt": "2026-03-18T03:46:01.522Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "orphan_spans|fe_be_connection|custom_spans|widget_data|span_gaps|span_timing|span_naming|attribute_completeness|transaction_completeness|general",
+    "title": "Non-standard operation values in browser spans",
+    "rule": "Rename browser spans to use standard op values like `browser.domContentLoadedEvent` → `ui.domContentLoaded`, etc.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773805561524-fyvu",
+    "createdAt": "2026-03-18T03:46:01.524Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "orphan_spans|fe_be_connection|custom_spans|widget_data|span_gaps|span_timing|span_naming|attribute_completeness|transaction_completeness|general",
+    "title": "HTTP spans missing METHOD /route format in description",
+    "rule": "Update HTTP span descriptions to follow the format 'METHOD /route', e.g., 'GET /api/users'.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773805561524-y4ai",
+    "createdAt": "2026-03-18T03:46:01.524Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "orphan_spans|fe_be_connection|custom_spans|widget_data|span_gaps|span_timing|span_naming|attribute_completeness|transaction_completeness|general",
+    "title": "Backend spans named 'METHOD /'",
+    "rule": "Ensure backend spans use the correct route format, e.g., 'GET /api/users' instead of just '/'.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773805561525-l561",
+    "createdAt": "2026-03-18T03:46:01.525Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming",
+    "title": "Fix non-standard UI event op values",
+    "rule": "Rename 'browser.domContentLoadedEvent', 'browser.loadEvent', and 'browser.connect' to 'ui.domContentLoaded', 'ui.pageLoad', and 'ui.connection'",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773805952537-gc5n",
+    "createdAt": "2026-03-18T03:52:32.537Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_gaps",
+    "title": "Ensure FE trace has corresponding BE transaction",
+    "rule": "Add `sentry-trace` header propagation from frontend to backend for all requests",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773805952540-9f7l",
+    "createdAt": "2026-03-18T03:52:32.540Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "attribute_completeness",
+    "title": "Add missing HTTP status code",
+    "rule": "Ensure `http.status_code` is set with `span.setAttributes({ 'http.status_code': res.statusCode })` in all HTTP span handlers",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773805952541-hpsf",
+    "createdAt": "2026-03-18T03:52:32.541Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "transaction_completeness",
+    "title": "Fix orphan spans and ensure transaction completeness",
+    "rule": "Identify and attach orphan spans to the correct parent transactions by adding `sentry-trace` header propagation",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773805952542-vtjf",
+    "createdAt": "2026-03-18T03:52:32.542Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming",
+    "title": "Correctly name browser events using Sentry semantic conventions",
+    "rule": "Ensure all browser event spans use 'browser.' prefix followed by the specific event type. Example: change `op=ui.long-animation-frame` to `op=browser.long-animation-frame`. Apply this rule to 'generation' and 'flows'.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "generation",
+      "flows"
+    ],
+    "id": "rule-1773806600982-0z5w",
+    "createdAt": "2026-03-18T04:03:20.982Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "transaction_completeness",
+    "title": "Ensure FE traces have corresponding BE transactions",
+    "rule": "Check for missing `sentry-trace` header propagation in frontend to backend requests. Apply this rule to 'dashboard'. (also seen in: training-ecommerce)",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "dashboard"
+    ],
+    "id": "rule-1773806600984-sb1x",
+    "createdAt": "2026-03-18T04:03:20.984Z",
+    "timesApplied": 1
+  },
+  {
+    "category": "span_timing",
+    "title": "Validate child spans do not fall outside parent time bounds",
+    "rule": "Review and adjust the timing of child spans to ensure they are within the valid range of their parent span. Apply this rule across all 'instrumentation'.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773806600986-jh6c",
+    "createdAt": "2026-03-18T04:03:20.986Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "attribute_completeness",
+    "title": "Add missing HTTP status codes to HTTP spans",
+    "rule": "Ensure all HTTP spans include the `http.status_code` attribute by adding `span.setAttributes({ 'http.status_code': res.statusCode });`. Apply this rule to 'flows' and 'instrumentation'.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "flows",
+      "instrumentation"
+    ],
+    "id": "rule-1773806600987-lv9e",
+    "createdAt": "2026-03-18T04:03:20.987Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_gaps",
+    "title": "Missing spans for critical checkout steps",
+    "rule": "Ensure that 'checkout.validate_cart', 'checkout.process_payment', and 'order.create' spans are added in the checkout flow. Use `with` statement to create these spans.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773807500404-kjf8",
+    "createdAt": "2026-03-18T04:18:20.404Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming",
+    "title": "Use standard op values for browser events",
+    "rule": "Rename 'browser.domContentLoadedEvent', 'browser.loadEvent', and 'browser.connect' spans to use Sentry semantic conventions like 'ui.domContentLoaded', 'ui.load', and 'network.request'. (also seen in: training-ecommerce)",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773807500408-wkd8",
+    "createdAt": "2026-03-18T04:18:20.408Z",
+    "timesApplied": 1
+  },
+  {
+    "category": "attribute_completeness",
+    "title": "Add missing HTTP status codes",
+    "rule": "In all HTTP spans, add the `http.status_code` attribute using `span.setAttributes({ 'http.status_code': res.statusCode });`.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773807500410-56zw",
+    "createdAt": "2026-03-18T04:18:20.410Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "transaction_completeness",
+    "title": "Ensure FE and BE transactions match",
+    "rule": "Verify that all frontend traces have corresponding backend traces. Check for missing `sentry-trace` header propagation between the two.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773807500411-ymn1",
+    "createdAt": "2026-03-18T04:18:20.411Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_timing",
+    "title": "I/O spans must wrap the actual async operation",
+    "rule": "DB, HTTP, and cache spans must wrap the actual async call inside their callback so Sentry records real latency. Zero-duration I/O spans mean the span was created but the operation was not awaited inside it. Example: await Sentry.startSpan({ op: \"db.query\" }, async () => { return await db.query(...) })",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "generation",
+      "instrumentation"
+    ],
+    "id": "rule-1773807868614-61wi",
+    "createdAt": "2026-03-18T04:24:28.614Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "attribute_completeness",
+    "title": "Add http.status_code to HTTP spans",
+    "rule": "Ensure all HTTP spans include the attribute 'http.status_code' set via span.setAttributes({ 'http.status_code': res.statusCode })",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773807878591-pibz",
+    "createdAt": "2026-03-18T04:24:38.591Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_timing",
+    "title": "Capture accurate timestamps for I/O operations",
+    "rule": "Ensure all I/O spans have non-zero durations by capturing accurate start and end times",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773807878592-ux84",
+    "createdAt": "2026-03-18T04:24:38.592Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "transaction_completeness",
+    "title": "Propagate sentry-trace header for FE-BE correlation",
+    "rule": "Ensure all frontend requests include the 'sentry-trace' header to correlate with backend transactions",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773807878593-robx",
+    "createdAt": "2026-03-18T04:24:38.593Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming|attribute_completeness",
+    "title": "Non-standard op values for browser spans",
+    "rule": "Ensure all browser span operations use standard Sentry semantic conventions. Replace 'browser.domContentLoadedEvent', 'browser.loadEvent', and 'browser.connect' with 'ui.domContentLoaded', 'ui.load', and 'network.request'.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773809478682-tqwr",
+    "createdAt": "2026-03-18T04:51:18.682Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_gaps|attribute_completeness",
+    "title": "Missing HTTP status codes in spans",
+    "rule": "Add http.status_code attribute to all HTTP spans. Use span.setAttributes({ 'http.status_code': res.statusCode }); after setting the response.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773809478684-jzgr",
+    "createdAt": "2026-03-18T04:51:18.684Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_gaps|transaction_completeness",
+    "title": "Missing critical transaction spans",
+    "rule": "Ensure that all critical transaction spans are properly created and linked. Add missing spans for 'checkout.validate_cart', 'checkout.process_payment', and 'order.create'.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773809478686-y5ph",
+    "createdAt": "2026-03-18T04:51:18.686Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming|attribute_completeness",
+    "title": "HTTP span descriptions should include method and route",
+    "rule": "Update HTTP span descriptions to follow the format 'METHOD /route'. For example, change 'browser.request' to 'GET /checkout/confirm'.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773809478687-r2hn",
+    "createdAt": "2026-03-18T04:51:18.687Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_gaps",
+    "title": "Missing checkout spans in transaction",
+    "rule": "Ensure that all necessary checkout spans (checkout.validate_cart, checkout.process_payment, order.create) are created and properly linked to the transaction.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773812312299-t49u",
+    "createdAt": "2026-03-18T05:38:32.299Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming",
+    "title": "Non-standard browser span names",
+    "rule": "Rename spans with non-standard op values (e.g., browser.domContentLoadedEvent, browser.loadEvent, browser.connect) to use Sentry semantic conventions.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773812312301-7w9y",
+    "createdAt": "2026-03-18T05:38:32.301Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "attribute_completeness",
+    "title": "Missing HTTP status codes in spans",
+    "rule": "Ensure that all HTTP spans include the 'http.status_code' attribute by adding span.setAttributes({ 'http.status_code': res.statusCode });",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773812312302-n169",
+    "createdAt": "2026-03-18T05:38:32.302Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "transaction_completeness",
+    "title": "Missing backend transaction for frontend trace",
+    "rule": "Verify that all frontend traces have a corresponding backend transaction by checking for the presence of the sentry-trace header and ensuring proper sampling.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773812312303-i7iz",
+    "createdAt": "2026-03-18T05:38:32.303Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming|attribute_completeness",
+    "title": "Missing HTTP spans with METHOD /route format",
+    "rule": "Ensure all HTTP spans have descriptions in the format 'METHOD /route'. Example: span.set_description('GET /api/users')",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773814489373-eykw",
+    "createdAt": "2026-03-18T06:14:49.373Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming|attribute_completeness",
+    "title": "Incorrectly named backend spans",
+    "rule": "Rename all spans named 'METHOD /' to include the specific route. Example: span.set_operation('GET /api/products')",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773814489375-1vjd",
+    "createdAt": "2026-03-18T06:14:49.375Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_gaps|transaction_completeness",
+    "title": "Missing backend transactions for frontend traces",
+    "rule": "Ensure that all frontend traces have corresponding backend transactions. Check for missing 'sentry-trace' headers.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773814489376-xeod",
+    "createdAt": "2026-03-18T06:14:49.376Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "attribute_completeness",
+    "title": "Missing HTTP status codes",
+    "rule": "Add the 'http.status_code' attribute to all HTTP spans using span.set_attribute('http.status_code', res.statusCode)",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773814489378-wzbo",
+    "createdAt": "2026-03-18T06:14:49.378Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "transaction_completeness",
+    "title": "Every page must produce a pageload or navigation transaction",
+    "rule": "The Sentry Browser SDK must be initialized before React hydrates so it can capture the pageload transaction. Initialize Sentry in _app.tsx or layout.tsx with browserTracingIntegration() enabled. Hard page loads produce \"pageload\" op; client-side navigations produce \"navigation\" op. If neither appears, the SDK init is missing or deferred. (also seen in: training-ecommerce)",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "generation",
+      "instrumentation"
+    ],
+    "id": "rule-1773815349126-03ll",
+    "createdAt": "2026-03-18T06:29:09.126Z",
+    "timesApplied": 1
+  },
+  {
+    "category": "span_naming|attribute_completeness",
+    "title": "Missing HTTP status code on HTTP spans",
+    "rule": "Ensure all HTTP spans include the 'http.status_code' attribute. Add it via span.setAttributes({ 'http.status_code': res.statusCode });",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773815359694-tb3g",
+    "createdAt": "2026-03-18T06:29:19.694Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming|attribute_completeness",
+    "title": "Missing server address and host on HTTP spans",
+    "rule": "Add the 'server.address' and 'http.host' attributes to all HTTP spans. Example: span.setAttributes({ 'server.address': req.connection.remoteAddress, 'http.host': req.headers.host });",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773815359697-7yne",
+    "createdAt": "2026-03-18T06:29:19.697Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming|attribute_completeness",
+    "title": "Incorrect op value for middleware and request handler spans",
+    "rule": "Rename middleware and request handler spans to use Sentry semantic conventions. Example: Use 'middleware.express' or 'request_handler.express' instead of 'unknown'.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773815359699-xq5c",
+    "createdAt": "2026-03-18T06:29:19.699Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "transaction_completeness|span_gaps",
+    "title": "Missing pageload or navigation transaction",
+    "rule": "Ensure the frontend Sentry SDK is initialized correctly. Add the following code at the entry point of your application: Sentry.init({ dsn: 'your-dsn-here' });",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773815359700-zbbi",
+    "createdAt": "2026-03-18T06:29:19.700Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_gaps|transaction_completeness",
+    "title": "Missing checkout spans in FE traces",
+    "rule": "Ensure all checkout-related spans (validate_cart, process_payment, order.create) are created and properly linked to the transaction. Use `Sentry.startTransaction` for transactions and `Sentry.startSpan` for individual spans.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773818379254-607b",
+    "createdAt": "2026-03-18T07:19:39.254Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming|attribute_completeness",
+    "title": "Non-standard op values in browser spans",
+    "rule": "Rename non-standard op values to match Sentry semantic conventions. For example, change `browser.domContentLoadedEvent` to `ui.domContentLoadedEvent`.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773818379256-t9vj",
+    "createdAt": "2026-03-18T07:19:39.256Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_gaps|transaction_completeness",
+    "title": "Missing backend transaction for FE trace",
+    "rule": "Ensure that the backend transaction is created and properly linked to the frontend transaction. Check for missing `sentry-trace` header propagation.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773818379257-9j5n",
+    "createdAt": "2026-03-18T07:19:39.257Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "attribute_completeness",
+    "title": "Missing http.status_code in HTTP spans",
+    "rule": "Add `http.status_code` attribute to all HTTP span(s) using `span.setAttributes({ 'http.status_code': res.statusCode });`. (also seen in: training-ecommerce)",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773818379258-nt5a",
+    "createdAt": "2026-03-18T07:19:39.258Z",
+    "timesApplied": 1
+  },
+  {
+    "category": "span_naming|attribute_completeness",
+    "title": "Missing product.list_fetch span",
+    "rule": "Add a span with op='product.list_fetch' in the code where the product list is fetched.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773825696083-rxci",
+    "createdAt": "2026-03-18T09:21:36.083Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming|attribute_completeness",
+    "title": "Missing cart.add_item span",
+    "rule": "Add a span with op='cart.add_item' in the code when an item is added to the cart.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773825696085-g8dw",
+    "createdAt": "2026-03-18T09:21:36.085Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming|attribute_completeness",
+    "title": "Missing checkout.validate_cart span",
+    "rule": "Add a span with op='checkout.validate_cart' in the code where the cart is validated during checkout.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773825696086-16f0",
+    "createdAt": "2026-03-18T09:21:36.086Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming|attribute_completeness",
+    "title": "Missing checkout.process_payment span",
+    "rule": "Add a span with op='checkout.process_payment' in the code where the payment is processed during checkout.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773825696087-r9b0",
+    "createdAt": "2026-03-18T09:21:36.087Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_gaps|custom_spans",
+    "title": "Missing checkout spans in FE trace",
+    "rule": "Ensure 'checkout.validate_cart', 'checkout.process_payment', and 'order.create' spans are added in the frontend code. Use Sentry's custom span API to create these spans at appropriate places.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773829358927-y7xq",
+    "createdAt": "2026-03-18T10:22:38.927Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming|custom_spans",
+    "title": "Non-standard op values for middleware and request handlers",
+    "rule": "Rename 'middleware.express' and 'request_handler.express' to use Sentry's standard op values such as 'http.middleware' and 'http.request'.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773829358929-p8om",
+    "createdAt": "2026-03-18T10:22:38.929Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "attribute_completeness|span_gaps",
+    "title": "Missing http.status_code attribute in HTTP spans",
+    "rule": "Add the 'http.status_code' attribute to all HTTP spans using `span.setAttributes({ 'http.status_code': res.statusCode })`.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773829358930-vx6g",
+    "createdAt": "2026-03-18T10:22:38.930Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "transaction_completeness|fe_be_connection",
+    "title": "Missing BE transaction for FE trace",
+    "rule": "Ensure that the frontend trace has a corresponding backend transaction by propagating the `sentry-trace` header correctly in all network requests.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773829358931-hejb",
+    "createdAt": "2026-03-18T10:22:38.931Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "orphan_spans|fe_be_connection|custom_spans|widget_data|span_gaps|span_timing|span_naming|attribute_completeness|transaction_completeness|general",
+    "title": "Missing product.list_fetch Span in FE Traces",
+    "rule": "Ensure that the `product.list_fetch` span is created before any UI interaction related to product lists. Add a custom span for this operation in your frontend code.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "generation"
+    ],
+    "id": "rule-1773846642364-q5r4",
+    "createdAt": "2026-03-18T15:10:42.364Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "orphan_spans|fe_be_connection|custom_spans|widget_data|span_gaps|span_timing|span_naming|attribute_completeness|transaction_completeness|general",
+    "title": "Missing cart.add_item Span in FE Traces",
+    "rule": "Add a custom span named `cart.add_item` before any operations that modify the shopping cart. This should be done in your frontend code where items are added to the cart.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "generation"
+    ],
+    "id": "rule-1773846642371-3hhc",
+    "createdAt": "2026-03-18T15:10:42.371Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "orphan_spans|fe_be_connection|custom_spans|widget_data|span_gaps|span_timing|span_naming|attribute_completeness|transaction_completeness|general",
+    "title": "Missing checkout.validate_cart Span in FE Traces",
+    "rule": "Insert a custom span named `checkout.validate_cart` before the payment process begins. This should be done in your frontend code where cart validation occurs.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "generation"
+    ],
+    "id": "rule-1773846642373-be3k",
+    "createdAt": "2026-03-18T15:10:42.373Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "orphan_spans|fe_be_connection|custom_spans|widget_data|span_gaps|span_timing|span_naming|attribute_completeness|transaction_completeness|general",
+    "title": "Missing checkout.process_payment Span in FE Traces",
+    "rule": "Add a custom span named `checkout.process_payment` when the payment process is initiated. This should be done in your frontend code where payment processing occurs.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "generation"
+    ],
+    "id": "rule-1773846642376-g41w",
+    "createdAt": "2026-03-18T15:10:42.376Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming|attribute_completeness|general",
+    "title": "Use Standard Op Values for Browser Spans",
+    "rule": "Replace non-standard op values like `browser.domContentLoadedEvent`, `browser.loadEvent`, and `browser.connect` with standard Sentry semantic conventions such as `ui.domContentLoaded`, `ui.load`, and `network.http.request`. Update the span names accordingly in your frontend code.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "generation"
+    ],
+    "id": "rule-1773846642379-8e45",
+    "createdAt": "2026-03-18T15:10:42.379Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "attribute_completeness|general",
+    "title": "Set HTTP Status Code for HTTP Spans",
+    "rule": "Ensure that all HTTP spans include the `http.status_code` attribute by adding `span.setAttributes({ 'http.status_code': res.statusCode });` after each HTTP request in your backend code.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "generation"
+    ],
+    "id": "rule-1773846642382-t65e",
+    "createdAt": "2026-03-18T15:10:42.382Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "attribute_completeness|general",
+    "title": "Add Server Address and Host Attributes to HTTP Spans",
+    "rule": "For all HTTP server spans, add the `server.address` and `http.host` attributes by setting them with appropriate values in your backend code.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "generation"
+    ],
+    "id": "rule-1773846642384-8vv0",
+    "createdAt": "2026-03-18T15:10:42.384Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "fe_be_connection|transaction_completeness|general",
+    "title": "Ensure FE Transactions Have Corresponding BE Transactions",
+    "rule": "Check that each frontend transaction has a corresponding backend transaction by ensuring the `sentry-trace` header is properly propagated from the frontend to the backend. This can be done by configuring your frontend and backend SDKs to automatically propagate trace headers.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "flow"
+    ],
+    "id": "rule-1773846642386-jtmk",
+    "createdAt": "2026-03-18T15:10:42.386Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_timing|general",
+    "title": "Validate Child Span Timing",
+    "rule": "Ensure that all child spans fall within the time bounds of their parent span by reviewing your code for any operations that might cause timing issues. Adjust the timing logic as necessary to maintain accurate span durations.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "code_review"
+    ],
+    "id": "rule-1773846642389-dkak",
+    "createdAt": "2026-03-18T15:10:42.389Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming|attribute_completeness",
+    "title": "HTTP Spans Missing Proper Format and Status Code",
+    "rule": "Ensure all HTTP spans have a description in the format 'METHOD /route' and include 'http.status_code'. Example: span.setAttributes({ 'http.status_code': res.statusCode });",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773846980742-2gjk",
+    "createdAt": "2026-03-18T15:16:20.742Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming|transaction_completeness",
+    "title": "Missing FE Transactions for BE Spans",
+    "rule": "Verify that all frontend transactions have corresponding backend transactions. Ensure sentry-trace header is correctly propagated.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773846980745-eftc",
+    "createdAt": "2026-03-18T15:16:20.745Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming|attribute_completeness",
+    "title": "Non-Standard Browser Span Op Values",
+    "rule": "Replace non-standard op values with Sentry semantic conventions. Example: Change 'browser.domContentLoadedEvent' to 'ui.domContentLoaded'.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773846980747-udr8",
+    "createdAt": "2026-03-18T15:16:20.747Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming|custom_spans",
+    "title": "Missing Custom Spans for Core E-commerce Operations",
+    "rule": "Add custom spans for essential e-commerce operations like 'checkout.validate_cart', 'checkout.process_payment', and 'order.create'.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773846980749-f3rp",
+    "createdAt": "2026-03-18T15:16:20.749Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "orphan_spans|fe_be_connection|custom_spans|widget_data|span_gaps|span_timing|span_naming|attribute_completeness|transaction_completeness|general",
+    "title": "Missing checkout spans in traces",
+    "rule": "Ensure that all checkout-related spans (checkout.validate_cart, checkout.process_payment, order.create) are properly created and linked within the transaction. Use `Sentry.startTransaction` to start a transaction for the entire checkout flow and use `span.startChild` to create child spans for each step.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773848588067-f5gt",
+    "createdAt": "2026-03-18T15:43:08.067Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "orphan_spans|fe_be_connection|custom_spans|widget_data|span_gaps|span_timing|span_naming|attribute_completeness|transaction_completeness|general",
+    "title": "Non-standard op values for resource spans",
+    "rule": "Rename spans with non-standard op values (resource.link, resource.script, paint) to use Sentry semantic conventions. For example, rename 'resource.link' to 'http.request' and add the correct HTTP method and route.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773848588072-mju3",
+    "createdAt": "2026-03-18T15:43:08.072Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "orphan_spans|fe_be_connection|custom_spans|widget_data|span_gaps|span_timing|span_naming|attribute_completeness|transaction_completeness|general",
+    "title": "Missing HTTP status code in spans",
+    "rule": "Ensure that all HTTP spans include the 'http.status_code' attribute. Use `span.setAttributes({ 'http.status_code': res.statusCode })` to set the status code after handling an HTTP request.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773848588075-k9yj",
+    "createdAt": "2026-03-18T15:43:08.075Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "orphan_spans|fe_be_connection|custom_spans|widget_data|span_gaps|span_timing|span_naming|attribute_completeness|transaction_completeness|general",
+    "title": "Incorrect transaction naming for backend spans",
+    "rule": "Ensure that backend spans are named with the correct HTTP method and route. For example, rename 'METHOD /' to 'GET /api/users' if handling a GET request to '/api/users'. Use `span.op = `${req.method} ${req.originalUrl}`` to set the correct operation name.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773848588078-ygvc",
+    "createdAt": "2026-03-18T15:43:08.078Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_gaps|transaction_completeness|general",
+    "title": "Missing checkout spans in traces",
+    "rule": "Ensure all checkout-related spans (checkout.validate_cart, checkout.process_payment, order.create) are properly created and linked within the transaction. Use `with sentry.start_span(op='checkout.validate_cart')` etc.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773848937668-2njr",
+    "createdAt": "2026-03-18T15:48:57.669Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming|general",
+    "title": "Non-standard op values in spans",
+    "rule": "Replace non-standard op values like 'resource.link', 'resource.script', and 'paint' with standard Sentry semantic conventions. For example, use `op='http.request'` for HTTP requests.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773848937672-z88l",
+    "createdAt": "2026-03-18T15:48:57.672Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "attribute_completeness|general",
+    "title": "Missing http.status_code in HTTP spans",
+    "rule": "Add the 'http.status_code' attribute to all HTTP spans using `span.set_attribute('http.status_code', res.statusCode)`. Ensure this is done for both frontend and backend spans.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773848937674-qens",
+    "createdAt": "2026-03-18T15:48:57.674Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "fe_be_connection|general",
+    "title": "Mismatch between FE and BE traces",
+    "rule": "Ensure that all frontend transactions have corresponding backend transactions by propagating the `sentry-trace` header correctly. Check for any sampling mismatches.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773848937675-flxm",
+    "createdAt": "2026-03-18T15:48:57.675Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_gaps|fe_be_connection",
+    "title": "Missing backend spans for critical transactions",
+    "rule": "Ensure all backend routes are correctly named using the Sentry semantic convention format, e.g., 'METHOD /route'. For example, rename '/orders' to 'GET /orders'.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773849347627-7lfn",
+    "createdAt": "2026-03-18T15:55:47.627Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "attribute_completeness|fe_be_connection",
+    "title": "HTTP span attributes missing critical information",
+    "rule": "Add the missing attributes to all HTTP spans: `span.setAttributes({ 'http.status_code': res.statusCode });`. For example, in a response handler, add this line after setting the status code.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773849347630-9br9",
+    "createdAt": "2026-03-18T15:55:47.630Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming|fe_be_connection",
+    "title": "Non-standard op values for resource spans",
+    "rule": "Rename non-standard op values to use Sentry semantic conventions. For example, change 'resource.link' to 'http.request', and 'resource.script' to 'http.request'.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773849347632-yjph",
+    "createdAt": "2026-03-18T15:55:47.632Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "transaction_completeness|fe_be_connection",
+    "title": "Missing backend transactions for frontend traces",
+    "rule": "Ensure that all frontend traces have corresponding backend transactions by propagating the `sentry-trace` header. Check that middleware or interceptors are correctly adding this header to requests.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773849347634-eaqb",
+    "createdAt": "2026-03-18T15:55:47.634Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "orphan_spans|fe_be_connection|custom_spans|widget_data|span_gaps|span_timing|span_naming|attribute_completeness|transaction_completeness|general",
+    "title": "Add missing backend span names",
+    "rule": "Ensure all backend spans are named using the Sentry semantic conventions, e.g., 'http.request' for HTTP requests.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773849750089-5gcu",
+    "createdAt": "2026-03-18T16:02:30.089Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "orphan_spans|fe_be_connection|custom_spans|widget_data|span_gaps|span_timing|span_naming|attribute_completeness|transaction_completeness|general",
+    "title": "Set HTTP status code for all HTTP spans",
+    "rule": "Add 'http.status_code' attribute to all HTTP spans using span.setAttributes({ 'http.status_code': res.statusCode });",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773849750091-v7s6",
+    "createdAt": "2026-03-18T16:02:30.091Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "orphan_spans|fe_be_connection|custom_spans|widget_data|span_gaps|span_timing|span_naming|attribute_completeness|transaction_completeness|general",
+    "title": "Propagate sentry-trace header for FE to BE traces",
+    "rule": "Ensure the 'sentry-trace' header is propagated from frontend to backend requests to maintain trace continuity.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "flows"
+    ],
+    "id": "rule-1773849750093-q0mf",
+    "createdAt": "2026-03-18T16:02:30.093Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "orphan_spans|fe_be_connection|custom_spans|widget_data|span_gaps|span_timing|span_naming|attribute_completeness|transaction_completeness|general",
+    "title": "Fix non-standard op values for browser spans",
+    "rule": "Rename 'resource.link', 'resource.script', and 'paint' spans to use standard Sentry op values like 'browser.request'.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773849750096-dcu4",
+    "createdAt": "2026-03-18T16:02:30.096Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming",
+    "title": "Fix non-standard op values for backend spans",
+    "rule": "Ensure all backend spans use standard op values like 'http.request' instead of 'router.express'. Example: Rename op to 'http.request' and set attributes { 'http.method': req.method, 'http.url': req.originalUrl }. (also seen in: training-ecommerce)",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773850707997-gu8y",
+    "createdAt": "2026-03-18T16:18:27.997Z",
+    "timesApplied": 1
+  },
+  {
+    "category": "attribute_completeness",
+    "title": "Add missing http.status_code attribute to HTTP spans",
+    "rule": "For all HTTP spans, add the 'http.status_code' attribute using span.setAttributes({ 'http.status_code': res.statusCode }). Example: Add span.setAttributes({ 'http.status_code': res.statusCode }); after res.send(). (also seen in: training-ecommerce)",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773850707999-nsjc",
+    "createdAt": "2026-03-18T16:18:27.999Z",
+    "timesApplied": 1
+  },
+  {
+    "category": "span_timing",
+    "title": "Fix child spans falling outside parent time bounds",
+    "rule": "Ensure that all child spans are properly nested within their parent span. Example: Ensure that the start and end times of child spans fall within the start and end times of their parent span.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773850708005-ywwy",
+    "createdAt": "2026-03-18T16:18:28.005Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "orphan_spans",
+    "title": "Orphan spans detected in traces",
+    "rule": "Ensure all spans are properly attached to a transaction. Check for missing `sentry-trace` header propagation between frontend and backend.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773851077551-2h6h",
+    "createdAt": "2026-03-18T16:24:37.552Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "missing_spans",
+    "title": "Missing order.create span in traces",
+    "rule": "Add a custom span named 'order.create' at the beginning of the order creation process to ensure it is captured by Sentry.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773851077556-jxge",
+    "createdAt": "2026-03-18T16:24:37.556Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming",
+    "title": "Non-standard op values used in spans",
+    "rule": "Replace non-standard op values like 'function.nextjs', 'middleware.express', and 'router.express' with standard Sentry semantic conventions such as 'http.request'.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773851077559-zeov",
+    "createdAt": "2026-03-18T16:24:37.559Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "attribute_completeness",
+    "title": "Missing http.status_code attribute in HTTP spans",
+    "rule": "Ensure all HTTP spans include the `http.status_code` attribute by adding `span.setAttributes({ 'http.status_code': res.statusCode });` after each HTTP request.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773851077561-veyi",
+    "createdAt": "2026-03-18T16:24:37.561Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming",
+    "title": "Correct backend span naming for Express routes",
+    "rule": "Rename all backend spans named 'METHOD /' to include the specific route, e.g., 'GET /api/users'.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773852952186-nivi",
+    "createdAt": "2026-03-18T16:55:52.186Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "transaction_completeness",
+    "title": "Ensure transactions are properly completed",
+    "rule": "Verify that all transactions have a non-zero duration by checking if end_timestamp ≈ start_timestamp and adjust accordingly.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773852952188-23kg",
+    "createdAt": "2026-03-18T16:55:52.188Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming|attribute_completeness",
+    "title": "HTTP spans missing METHOD /route format in description",
+    "rule": "Ensure all HTTP spans have descriptions formatted as 'METHOD /route'. For example, change `op=browser.request desc=\"http://localhost:3000/orders\"` to `op=browser.request desc=\"GET /orders\"`. Apply this rule to the entire application.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773853357241-2nde",
+    "createdAt": "2026-03-18T17:02:37.241Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "attribute_completeness",
+    "title": "HTTP spans missing http.status_code attribute",
+    "rule": "Add `span.setAttributes({ 'http.status_code': res.statusCode });` after each HTTP request to set the status code. Apply this rule to all HTTP request handling functions. (also seen in: training-ecommerce)",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773853357245-xhr0",
+    "createdAt": "2026-03-18T17:02:37.245Z",
+    "timesApplied": 1
+  },
+  {
+    "category": "transaction_completeness|fe_be_connection",
+    "title": "FE traces missing corresponding BE transaction",
+    "rule": "Ensure that each FE trace has a corresponding BE transaction by propagating the `sentry-trace` header. Check middleware or interceptors responsible for sending requests and ensure they include the `sentry-trace` header in the request.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "flows"
+    ],
+    "id": "rule-1773853357248-ui8d",
+    "createdAt": "2026-03-18T17:02:37.248Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_timing|span_gaps",
+    "title": "Child span falling outside parent time bounds",
+    "rule": "Review the code where child spans are created and ensure they do not exceed their parent's time bounds. Adjust timing logic if necessary, especially in asynchronous operations.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773853357251-b2k1",
+    "createdAt": "2026-03-18T17:02:37.251Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming|attribute_completeness",
+    "title": "Missing HTTP Method and Route in Span Description",
+    "rule": "Ensure all HTTP spans have a description in the format 'METHOD /route'. For example, use 'GET /api/users' instead of just '/api/users'.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773853920036-9p68",
+    "createdAt": "2026-03-18T17:12:00.036Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "attribute_completeness",
+    "title": "Missing HTTP Status Code Attribute",
+    "rule": "Add the http.status_code attribute to all HTTP spans using span.setAttributes({ 'http.status_code': res.statusCode });",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773853920039-uzhv",
+    "createdAt": "2026-03-18T17:12:00.039Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming|attribute_completeness",
+    "title": "Incorrect Span Names for Express Routes",
+    "rule": "Rename backend spans with names like 'METHOD /' to include the actual route, e.g., 'GET /api/users'. Ensure all span names follow Sentry's semantic conventions.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773853920041-7h9z",
+    "createdAt": "2026-03-18T17:12:00.041Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_timing|orphan_spans",
+    "title": "Child Span Outside Parent Time Bounds",
+    "rule": "Ensure that all child spans are within the time bounds of their parent spans. Review and adjust the timing logic in your instrumentation to prevent orphan spans.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773853920043-oi45",
+    "createdAt": "2026-03-18T17:12:00.043Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming",
+    "title": "HTTP spans missing METHOD /route format",
+    "rule": "Ensure all HTTP spans have a description in the format 'METHOD /route'. Example: span.setSpanDescription('GET /api/users');",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773855191863-3mb9",
+    "createdAt": "2026-03-18T17:33:11.863Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_gaps",
+    "title": "FE trace with no corresponding BE transaction",
+    "rule": "Ensure that all FE traces are properly propagated to the BE by including the sentry-trace header in network requests.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773855191872-f3jr",
+    "createdAt": "2026-03-18T17:33:11.872Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "transaction_completeness",
+    "title": "Unfinished transaction with end_timestamp ≈ start_timestamp",
+    "rule": "Ensure that all transactions are properly ended. Check for any logic where a transaction might be prematurely closed or not started.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773855191877-e9i4",
+    "createdAt": "2026-03-18T17:33:11.877Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "orphan_spans|fe_be_connection",
+    "title": "FE trace missing corresponding BE transaction",
+    "rule": "Ensure that every FE transaction has a corresponding BE transaction by propagating the `sentry-trace` header in all outgoing requests.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773855575867-3xqc",
+    "createdAt": "2026-03-18T17:39:35.867Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "attribute_completeness|db_spans",
+    "title": "Missing db.statement / db.operation attribute on DB spans",
+    "rule": "Add the `db.statement` and `db.operation` attributes to all database spans. For example, if using SQLAlchemy, ensure that your query is logged within a span.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773855575872-99vd",
+    "createdAt": "2026-03-18T17:39:35.872Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_gaps|fe_be_connection",
+    "title": "FE trace missing corresponding BE transaction due to sampling mismatch",
+    "rule": "Verify that the sampling rates for FE and BE traces are consistent. Adjust sampling rates if necessary to ensure proper correlation.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773855575876-akxe",
+    "createdAt": "2026-03-18T17:39:35.876Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming|fe_spans",
+    "title": "FE spans not properly named",
+    "rule": "Ensure that all FE spans are named correctly using the `op` attribute. For example, use `browser.domContentLoadedEvent` for DOMContentLoaded events.",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773855575879-i5xx",
+    "createdAt": "2026-03-18T17:39:35.879Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "orphan_spans",
+    "title": "Unparented Express Middleware Spans",
+    "rule": "When creating spans for Express middleware functions (e.g., 'query', 'expressInit', 'corsMiddleware', 'jsonParser'), ensure they are properly parented to the corresponding HTTP server span. This can be achieved by using the `sentry.Trace` context to create a child span, e.g., `const childSpan = sentry.Trace.getActiveSpan().startChild('middleware.express', { 'express.name': 'query' })`",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773856583603-06q2",
+    "createdAt": "2026-03-18T17:56:23.603Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_timing",
+    "title": "Child Spans Exceeding Parent Time Bounds",
+    "rule": "When creating child spans for asynchronous operations, such as the `GET http://localhost:3001/api/cart` request, ensure that the child span's end time does not exceed the parent span's end time. This can be achieved by using `span.end()` to end the child span when the asynchronous operation completes",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773856583610-91bz",
+    "createdAt": "2026-03-18T17:56:23.610Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming",
+    "title": "Inconsistent HTTP Span Naming",
+    "rule": "For HTTP client spans, such as `GET http://localhost:3001/api/cart`, use a consistent naming format, e.g., `GET /api/cart`, by setting the `desc` attribute of the span to the HTTP method and path, e.g., `span.setDescription('GET /api/cart')`",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773856583612-tlm7",
+    "createdAt": "2026-03-18T17:56:23.612Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming",
+    "title": "Missing HTTP Method",
+    "rule": "In the `http.server` and `http.client` spans, ensure the description includes the HTTP method (e.g., 'GET', 'POST') followed by the route (e.g., '/api/users') by using the format 'METHOD /route' in the span description, such as `span.setDescription('GET /api/checkout/validate-cart')`",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773856699483-73wj",
+    "createdAt": "2026-03-18T17:58:19.483Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "attribute_completeness",
+    "title": "Missing HTTP Status Code",
+    "rule": "In the `http.client` spans, add the `http.status_code` attribute by using `span.setAttributes({ 'http.status_code': res.statusCode })` to include the HTTP status code in the span data, such as in the `product.list_fetch` span",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773856699487-uoti",
+    "createdAt": "2026-03-18T17:58:19.487Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_timing",
+    "title": "Child Span Timing",
+    "rule": "Ensure that child spans, such as those with `op=middleware.express`, are properly timed within their parent span by using `span.start()` and `span.finish()` methods to define the span boundaries, preventing child spans from falling outside parent time bounds",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773856699490-gs2l",
+    "createdAt": "2026-03-18T17:58:19.490Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_gaps",
+    "title": "Missing Order Create Span",
+    "rule": "In the ecommerce application, ensure that a span is created for the `order.create` operation by using a specific method or function name, such as `createOrder()` or `orderCreateHandler()`, and instrumenting it with a span, such as `span = tracer.startSpan('order.create')`",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773856699492-ckaf",
+    "createdAt": "2026-03-18T17:58:19.492Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "attribute_completeness",
+    "title": "Missing http.status_code",
+    "rule": "In the http.client spans, such as 'product.list_fetch' and 'GET http://localhost:3001/api/product/list-fetch', add the 'http.status_code' attribute using span.setAttributes({ 'http.status_code': res.statusCode })",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773856814336-jphj",
+    "createdAt": "2026-03-18T18:00:14.336Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_naming",
+    "title": "Incorrect HTTP Span Naming",
+    "rule": "In the http.server spans, such as 'GET /', update the description to include the 'METHOD /route' format, e.g., 'GET /api/users'",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773856814342-1k3f",
+    "createdAt": "2026-03-18T18:00:14.342Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "span_timing",
+    "title": "Child Span Timing Issue",
+    "rule": "In the express.js middleware, ensure that child spans, such as 'query', 'expressInit', 'corsMiddleware', and 'jsonParser', are properly closed before their parent spans, to prevent timing issues",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773856814346-4iaw",
+    "createdAt": "2026-03-18T18:00:14.346Z",
+    "timesApplied": 0
+  },
+  {
+    "category": "orphan_spans",
+    "title": "Missing order.create Span",
+    "rule": "Add a span for the 'order.create' operation, ensuring it is properly linked to its parent span, to prevent missing spans in the trace",
+    "discoveredFrom": "training-ecommerce",
+    "applyTo": [
+      "instrumentation"
+    ],
+    "id": "rule-1773856814349-asmx",
+    "createdAt": "2026-03-18T18:00:14.349Z",
+    "timesApplied": 0
+  }
+]

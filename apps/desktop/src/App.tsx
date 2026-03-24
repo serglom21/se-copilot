@@ -11,6 +11,7 @@ import DataGeneratorPage from './pages/DataGeneratorPage';
 import DeployPage from './pages/DeployPage';
 import PublishPage from './pages/PublishPage';
 import TraceHealthPage from './pages/TraceHealthPage';
+import TrainingPage from './pages/TrainingPage';
 import SettingsPage from './pages/SettingsPage';
 
 function App() {
@@ -24,6 +25,7 @@ function App() {
         <Route index element={<HomePage />} />
         <Route path="new" element={<NewProjectPage />} />
         <Route path="settings" element={<SettingsPage />} />
+        <Route path="training" element={<TrainingPage />} />
         
         {/* Project-specific routes */}
         {currentProject && (
