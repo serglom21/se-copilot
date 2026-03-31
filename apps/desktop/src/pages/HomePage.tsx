@@ -176,7 +176,7 @@ export default function HomePage() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-2xl font-semibold text-white">Projects</h1>
-          <p className="text-sm text-white/45 mt-0.5">Manage your Sentry demo projects</p>
+          <p className="text-sm text-white/45 mt-0.5">Every great demo leaves a trace 🐾</p>
         </div>
         <Link to="/new">
           <Button size="md">

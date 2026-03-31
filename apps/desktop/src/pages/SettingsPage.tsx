@@ -84,7 +84,7 @@ export default function SettingsPage() {
     <div className="p-8 max-w-3xl mx-auto">
       <div className="mb-6">
         <h1 className="text-2xl font-semibold text-white">Settings</h1>
-        <p className="text-sm text-white/45 mt-0.5">Configure your SE Copilot preferences</p>
+        <p className="text-sm text-white/45 mt-0.5">Configure your Pawprint preferences</p>
       </div>
 
       <div className="space-y-4">
@@ -275,16 +275,16 @@ export default function SettingsPage() {
 
         {/* Sentry Testing */}
         <Section icon={<FlaskConical size={16} />} title="Sentry Integration Testing">
-          <p className="text-xs text-white/45">Verify that Sentry is capturing events from SE Copilot.</p>
+          <p className="text-xs text-white/45">Verify that Sentry is capturing events from Pawprint.</p>
           <div className="flex gap-2 flex-wrap">
             <Button variant="secondary" size="sm" onClick={() => {
-              Sentry.captureMessage('Test message from SE Copilot Settings', 'info');
+              Sentry.captureMessage('Test message from Pawprint Settings', 'info');
               toast.info('Test message sent to Sentry');
             }}>
               Send Test Message
             </Button>
             <Button variant="danger" size="sm" onClick={() => {
-              try { throw new Error('Test error from SE Copilot Settings'); }
+              try { throw new Error('Test error from Pawprint Settings'); }
               catch (error) {
                 Sentry.captureException(error);
                 toast.success('Test error sent to Sentry');

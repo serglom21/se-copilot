@@ -21,8 +21,12 @@ export async function forwardTracesToSentry(
   repairedSpanIds: Set<string>,
   onOutput: (msg: string) => void
 ): Promise<{ forwarded: number; errors: string[] }> {
-  const parsedFe = parseDsn(frontendDsn, true);
-  const parsedBe = parseDsn(backendDsn, false);
+  const parsedFe = frontendDsn ? parseDsn(frontendDsn, true) : null;
+  const parsedBe = backendDsn ? parseDsn(backendDsn, false) : null;
+
+  if (!parsedFe && !parsedBe) {
+    return { forwarded: 0, errors: ['No valid DSNs configured — nothing forwarded'] };
+  }
 
   let forwarded = 0;
   const errors: string[] = [];
@@ -30,6 +34,7 @@ export async function forwardTracesToSentry(
   for (const trace of traces) {
     for (const tx of trace.transactions) {
       const dsn = selectDsn(tx, parsedFe, parsedBe);
+      if (!dsn) continue; // no DSN available for this transaction type
 
       // Find the raw envelope(s) that contain this transaction
       const matchingEnvelopes = rawEnvelopes.filter(e => e.traceId === trace.trace_id);
@@ -81,20 +86,20 @@ export function parseDsn(dsn: string, isFrontend: boolean): ParsedDsn {
 
 function selectDsn(
   tx: CapturedTransaction,
-  feDsn: ParsedDsn,
-  beDsn: ParsedDsn
-): ParsedDsn {
+  feDsn: ParsedDsn | null,
+  beDsn: ParsedDsn | null
+): ParsedDsn | null {
   const sdk = tx.sdk ?? '';
   // BE transaction: Python SDK or Node.js http.server
   if (sdk.includes('python') || (sdk.includes('node') && tx.op === 'http.server')) {
-    return beDsn;
+    return beDsn ?? feDsn;
   }
   // FE transaction: browser SDK or pageload/navigation
   if (sdk.includes('browser') || sdk.includes('javascript') || tx.op === 'pageload' || tx.op === 'navigation') {
-    return feDsn;
+    return feDsn ?? beDsn;
   }
   // Fallback: use BE for http.server, FE for everything else
-  return tx.op === 'http.server' ? beDsn : feDsn;
+  return (tx.op === 'http.server' ? beDsn : feDsn) ?? feDsn ?? beDsn;
 }
 
 // ── Raw envelope forwarding ───────────────────────────────────────────────────

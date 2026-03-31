@@ -95,7 +95,7 @@ app.whenReady().then(async () => {
   // Auto-start the local trace ingest server on app launch
   traceIngestService.start().catch(e => console.warn('[TraceIngest] Auto-start failed (port in use?):', e.message));
   // Backup dir: ~/Documents/SE Copilot/ — outside app userData, survives crashes/reinstalls
-  const backupDir = path.join(app.getPath('documents'), 'SE Copilot');
+  const backupDir = path.join(app.getPath('documents'), 'Pawprint');
   rulesBank = new RulesBankService(userDataPath, backupDir);
   llmService.setRulesBank(rulesBank);
   // Re-create GeneratorService with rulesBank so static generators are also rule-aware

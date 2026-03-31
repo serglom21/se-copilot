@@ -1,11 +1,25 @@
 import fs from 'fs';
 import path from 'path';
 import { StorageService } from './storage';
-import { LLMService } from './llm';
+import { LLMService, InstrumentationDeclaration } from './llm';
 import { RulesBankService } from './rules-bank';
 import { validateGeneratedApp } from './app-validator';
 import { EngagementSpec, SpanDefinition } from '../../src/types/spec';
 import { checkPageSyntax, formatSyntaxErrorsForLLM } from './page-syntax-validator';
+import { injectInstrumentation, assertInjectionCorrectness, assertNoInventedTraceFunctions, removeForeignMarkers, fillMissingMarkersFromRoutes, normaliseTraceFunctionNames } from './instrumentation-injector';
+import { extractDOMManifest } from './dom-extractor';
+import { deriveRouteContract, RouteContract } from './route-contract';
+import { TraceTopologyContract, loadTopologyContract, loadFreshTopologyContract, hashBrief } from './trace-topology-contract';
+import { injectContractUrls } from './route-url-injector';
+import { normaliseSpanNames } from './span-name-normaliser';
+import { checkPageUIStructure, buildUIRepairPrompt } from './ui-structure-validator';
+import { runStaticTopologyValidation, TopologyIssue } from './static-topology-validator';
+import { classifyRepair, applyDeterministicFix, postGenerationCheck, validateInstrumentationDeclaration } from './generation-state';
+import { surgicalRepair } from './surgical-repairer';
+// ---------------------------------------------------------------------------
+// Complexity-scaled attempt budget
+// ---------------------------------------------------------------------------
+
 
 export class GeneratorService {
   private storage: StorageService;
@@ -56,6 +70,13 @@ export class GeneratorService {
         }
       }
 
+      // Route contract — derived before code generation, used in health check after validation
+      let routeContract: RouteContract | undefined;
+
+      // Trace Topology Contract — frozen by Architect agent before any code generation.
+      // If already generated (plan phase), load it; otherwise generate now.
+      let topologyContract: TraceTopologyContract | null = null;
+
       // Create app structure based on stack type
       if (project.stack.type === 'backend-only') {
         progress(15, 'Scaffolding backend…');
@@ -74,14 +95,264 @@ export class GeneratorService {
       } else {
         progress(15, 'Scaffolding directories…');
         this.createDirectoryStructure(appPath);
+
+        // Derive the route contract ONCE before any code generation.
+        // Both frontend and backend LLM calls receive the same contract — neither derives paths independently.
+        progress(18, 'Deriving route contract…');
+        routeContract = deriveRouteContract(project, outputPath);
+
+        // Phase 1 — Architect: produce/load frozen Trace Topology Contract.
+        // If already written to disk (from a prior plan step), load it; otherwise generate now.
+        // Use loadFreshTopologyContract to discard stale contracts when the brief has changed.
+        try {
+          const currentBriefHash = hashBrief({
+            vertical: project.project.vertical,
+            notes: project.project.notes,
+            stackType: project.stack.type,
+          });
+          topologyContract = loadFreshTopologyContract(outputPath, currentBriefHash);
+          if (topologyContract) {
+            onOutput?.(`🐾 Loaded frozen topology contract (${topologyContract.spans.length} spans)\n`);
+          }
+        } catch { /* will generate below */ }
+
+        if (!topologyContract) {
+          progress(20, '🐾 Architect: building Trace Topology Contract…');
+          onOutput?.('🐾 Architect agent: building Trace Topology Contract…\n');
+          try {
+            topologyContract = await this.llm.generateTraceTopologyContract(project, outputPath);
+            onOutput?.(`🐾 Contract frozen — ${topologyContract.spans.length} spans, ${topologyContract.transactions.length} transactions\n`);
+          } catch (contractErr: any) {
+            onOutput?.(`⚠ Contract generation failed (${contractErr?.message}) — proceeding with spec-based instrumentation\n`);
+            console.warn('[generator] Topology contract failed:', contractErr);
+          }
+        }
+
         progress(22, 'Generating instrumentation wrappers…');
-        await this.generateFrontend(appPath, project, progress);
+        await this.generateFrontend(appPath, project, progress, routeContract, topologyContract);
         progress(65, 'Generating Express backend…');
-        await this.generateBackend(appPath, project, progress);
+        await this.generateBackend(appPath, project, progress, routeContract, topologyContract);
+
+        // Normalise backend api.ts marker names — LLM often drops the namespace prefix
+        // (e.g. "validate_user_input" instead of "backend.validate_user_input").
+        // Run the same normalise→removeForeign pipeline used for frontend pages.
+        if (topologyContract) {
+          const apiPath = path.join(appPath, 'backend', 'src', 'routes', 'api.ts');
+          if (fs.existsSync(apiPath)) {
+            normaliseSpanNames([apiPath], topologyContract);
+            const beSpanNames = topologyContract.spans
+              .filter(s => s.layer === 'backend')
+              .map(s => s.name);
+            removeForeignMarkers(apiPath, beSpanNames);
+          }
+        }
+
         progress(82, 'Backend ready');
+
+        // Phase 4 — Static topology validation against the frozen contract.
+        // Runs deterministic checks on generated source files before the build.
+        if (topologyContract) {
+          progress(84, '🐾 Static topology validation…');
+          onOutput?.('\n🐾 Running static topology validation…\n');
+          const staticResult = runStaticTopologyValidation(topologyContract, appPath);
+
+          if (staticResult.passed) {
+            onOutput?.(`   ✓ All topology checks passed (${topologyContract.spans.length} spans verified)\n`);
+          } else {
+            onOutput?.(`   ⚠ ${staticResult.errors.length} error(s), ${staticResult.warnings.length} warning(s) found\n`);
+
+            // Repair loop — deterministic first, then LLM targeted/rewrite
+            const settings = this.storage.getSettings();
+            const llmConfig = { baseUrl: settings.llm.baseUrl, apiKey: settings.llm.apiKey, model: settings.llm.model };
+            const repairableErrors = [...staticResult.errors];
+            const accumulatedDiffs = new Map<string, string>();
+            let repairAttempt = 0;
+            const MAX_REPAIR_ATTEMPTS = 3;
+
+            while (repairableErrors.length > 0 && repairAttempt < MAX_REPAIR_ATTEMPTS) {
+              repairAttempt++;
+              onOutput?.(`\n   🔧 Repair pass ${repairAttempt}/${MAX_REPAIR_ATTEMPTS} (${repairableErrors.length} issue(s))…\n`);
+
+              const resolved: TopologyIssue[] = [];
+
+              // Group errors by file for efficient batching
+              const byFile = new Map<string, TopologyIssue[]>();
+              for (const issue of repairableErrors) {
+                const key = issue.file;
+                if (!byFile.has(key)) byFile.set(key, []);
+                byFile.get(key)!.push(issue);
+              }
+
+              for (const [, fileIssues] of byFile) {
+                for (const issue of fileIssues) {
+                  const strategy = classifyRepair(issue, fileIssues.length, repairAttempt - 1);
+
+                  if (strategy === 'contract_violation') {
+                    onOutput?.(`   ⚠ Contract violation (invented span "${issue.spanName}") — skipping, contract is frozen\n`);
+                    resolved.push(issue);
+                    continue;
+                  }
+
+                  if (strategy === 'deterministic') {
+                    const fixed = applyDeterministicFix(issue);
+                    if (fixed) {
+                      onOutput?.(`   ✓ Deterministic fix applied for ${issue.type}\n`);
+                      resolved.push(issue);
+                    }
+                    continue;
+                  }
+
+                  // missing_marker: deterministic approach — use fillMissingMarkersFromRoutes
+                  // on the correct file before falling back to LLM.
+                  if (issue.type === 'missing_marker' && issue.spanName && routeContract) {
+                    const span = topologyContract.spans.find(s => s.name === issue.spanName);
+                    if (span) {
+                      let targetFile: string | null = null;
+                      if (span.layer === 'frontend') {
+                        const frontendAppDir = path.join(appPath, 'frontend', 'app');
+                        const prefix = issue.spanName.split('.')[0];
+                        // For spans like "pageload" (no dot), try all page files and
+                        // pick the first one that already has other markers — it's likely
+                        // the page where this span should be.
+                        const noDot = !issue.spanName.includes('.');
+                        const candidates = noDot
+                          ? (() => {
+                              const found: string[] = [];
+                              const walkForPage = (dir: string) => {
+                                for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+                                  const full = path.join(dir, e.name);
+                                  if (e.isDirectory() && e.name !== 'node_modules') walkForPage(full);
+                                  else if (e.isFile() && e.name === 'page.tsx') found.push(full);
+                                }
+                              };
+                              if (fs.existsSync(frontendAppDir)) walkForPage(frontendAppDir);
+                              // Prefer pages that already have other INSTRUMENT markers
+                              found.sort((a, b) => {
+                                const hasMarkersA = fs.readFileSync(a, 'utf-8').includes('// INSTRUMENT:') ? 1 : 0;
+                                const hasMarkersB = fs.readFileSync(b, 'utf-8').includes('// INSTRUMENT:') ? 1 : 0;
+                                return hasMarkersB - hasMarkersA;
+                              });
+                              return found;
+                            })()
+                          : [
+                              path.join(frontendAppDir, prefix, 'page.tsx'),
+                              path.join(frontendAppDir, prefix, 'page.ts'),
+                              path.join(frontendAppDir, 'page.tsx'),
+                            ];
+                        for (const candidate of candidates) {
+                          if (fs.existsSync(candidate)) { targetFile = candidate; break; }
+                        }
+                      } else {
+                        // Backend: marker goes in api.ts
+                        const candidate = path.join(appPath, 'backend', 'src', 'routes', 'api.ts');
+                        if (fs.existsSync(candidate)) targetFile = candidate;
+                      }
+
+                      if (targetFile) {
+                        const added = fillMissingMarkersFromRoutes(targetFile, [{ name: issue.spanName }], routeContract);
+                        if (added.length > 0) {
+                          onOutput?.(`   ✓ Inserted missing marker for "${issue.spanName}" in ${path.basename(targetFile)}\n`);
+                          resolved.push(issue);
+                          continue;
+                        }
+                      }
+                    }
+                    // Deterministic failed (no fetch/try-block match) — fall through to LLM below
+                  }
+
+                  // targeted_patch or file_rewrite — use LLM via surgical-repairer
+                }
+
+                // Batch remaining LLM-fixable issues for this file
+                const llmIssues = fileIssues.filter(i => {
+                  if (resolved.some(r => r === i)) return false; // already resolved above
+                  const s = classifyRepair(i, fileIssues.length, repairAttempt - 1);
+                  return s === 'targeted_patch' || s === 'file_rewrite';
+                });
+
+                if (llmIssues.length > 0) {
+                  try {
+                    // Convert TopologyIssue → TraceIssue-compatible shape for surgical-repairer.
+                    // For missing_marker issues we target the PAGE file (frontend) or api.ts (backend),
+                    // NOT instrumentation.ts — the validator runs pre-injection so files still have markers.
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    const traceIssues: any[] = llmIssues.map(i => {
+                      const isFrontend = topologyContract.spans.find(s => s.name === i.spanName)?.layer === 'frontend'
+                        || i.file.includes('frontend');
+                      const isMissingMarker = i.type === 'missing_marker';
+                      let repairTarget: string;
+                      if (isMissingMarker && isFrontend) {
+                        repairTarget = 'frontend_page';
+                      } else if (isFrontend) {
+                        repairTarget = 'frontend_instrumentation';
+                      } else {
+                        repairTarget = 'backend_routes';
+                      }
+                      return {
+                        kind: i.type,
+                        spanName: i.spanName,
+                        repairTarget,
+                        fixable: false,
+                        severity: i.severity,
+                        affectedFlows: [],
+                        detail: `[${i.type}]${i.spanName ? ` (${i.spanName})` : ''}: expected ${i.expected} — found ${i.found}`,
+                      };
+                    });
+
+                    const patched = await surgicalRepair(
+                      traceIssues,
+                      repairAttempt,
+                      appPath,
+                      project,
+                      [],
+                      llmConfig,
+                      (msg) => onOutput?.(msg),
+                      this.llm,
+                      accumulatedDiffs
+                    );
+
+                    if (patched.length > 0) {
+                      resolved.push(...llmIssues);
+                    }
+                  } catch (repairErr: any) {
+                    onOutput?.(`   ✗ LLM repair failed: ${repairErr?.message}\n`);
+                  }
+                }
+              }
+
+              // Remove resolved issues
+              for (const r of resolved) {
+                const idx = repairableErrors.indexOf(r);
+                if (idx !== -1) repairableErrors.splice(idx, 1);
+              }
+
+              // Re-validate to check if repairs introduced new issues
+              if (resolved.length > 0 && repairableErrors.length > 0) {
+                const recheck = runStaticTopologyValidation(topologyContract, appPath);
+                repairableErrors.length = 0;
+                repairableErrors.push(...recheck.errors);
+              }
+            }
+
+            if (repairableErrors.length > 0) {
+              onOutput?.(`\n   ⚠ ${repairableErrors.length} topology issue(s) unresolved after ${repairAttempt} attempt(s) — proceeding with warnings\n`);
+              for (const i of repairableErrors) {
+                onOutput?.(`     • [${i.type}]${i.spanName ? ` ${i.spanName}` : ''}: ${i.expected}\n`);
+              }
+            } else {
+              onOutput?.(`   ✓ All topology issues resolved\n`);
+            }
+          }
+        }
       }
 
-      progress(85, 'Writing config files…');
+      // Inject instrumentation AFTER static topology validation + repair so that
+      // the validator works with raw // INSTRUMENT: markers (its designed input).
+      progress(85, '🐾 Injecting instrumentation…');
+      onOutput?.('\n🐾 Injecting instrumentation wrappers…\n');
+      this.injectAllInstrumentation(appPath, project, onOutput);
+
+      progress(86, 'Writing config files…');
       this.generateConfigFiles(appPath, project);
 
       progress(92, 'Generating user flows…');
@@ -108,10 +379,27 @@ export class GeneratorService {
             project,
             llmConfig,
             (_pct, label) => { progress(97, label); },
-            (line) => { onOutput?.(line); }
+            (line) => { onOutput?.(line); },
+            this.llm,
+            routeContract
           );
           if (validationResult.buildRepaired) {
             onOutput?.('✓ Build errors were auto-repaired\n');
+            // Fix A: Re-run static topology validation after build repair modified source files.
+            // The LLM repair loop can change instrumentation.ts — re-validate to surface any
+            // topology regressions introduced by the repair before the run completes.
+            if (topologyContract) {
+              onOutput?.('\n🐾 Re-checking topology after build repair…\n');
+              const postRepairStatic = runStaticTopologyValidation(topologyContract, appPath);
+              if (postRepairStatic.passed) {
+                onOutput?.('   ✓ Topology still clean after build repair\n');
+              } else {
+                onOutput?.(`   ⚠ ${postRepairStatic.errors.length} topology issue(s) surfaced after build repair:\n`);
+                for (const i of postRepairStatic.errors) {
+                  onOutput?.(`     • [${i.type}]${i.spanName ? ` ${i.spanName}` : ''}: ${i.expected}\n`);
+                }
+              }
+            }
           }
           if (validationResult.errors.length > 0) {
             onOutput?.(`⚠ Validation issues: ${validationResult.errors.join('; ')}\n`);
@@ -239,7 +527,9 @@ NUM_ERRORS=20
   private async generateFrontend(
     appPath: string,
     project: EngagementSpec,
-    progress?: (pct: number, label: string) => void
+    progress?: (pct: number, label: string) => void,
+    routeContract?: RouteContract,
+    topologyContract?: TraceTopologyContract | null
   ): Promise<void> {
     const frontendPath = path.join(appPath, 'frontend');
 
@@ -344,13 +634,14 @@ module.exports = {
 
     progress?.(30, 'Writing frontend pages…');
     // Pages - use LLM to generate with proper instrumentation
-    await this.generateFrontendPagesWithLLM(frontendPath, project);
+    await this.generateFrontendPagesWithLLM(frontendPath, project, routeContract, topologyContract);
   }
 
   private async generateBackend(
     appPath: string,
     project: EngagementSpec,
-    progress?: (pct: number, label: string) => void
+    progress?: (pct: number, label: string) => void,
+    routeContract?: RouteContract
   ): Promise<void> {
     const backendPath = path.join(appPath, 'backend');
 
@@ -412,7 +703,7 @@ module.exports = {
     // Always generate template routes first — guaranteed correct structure:
     // correct paths, continueTrace, span wrappers, http.status_code.
     // Then optionally enrich stub bodies with LLM (cosmetic only — never touches structure).
-    this.generateBackendRoutes(backendPath, project);
+    this.generateBackendRoutes(backendPath, project, routeContract);
     await this.enhanceRouteStubsWithLLM(backendPath, project);
   }
 
@@ -549,7 +840,7 @@ module.exports = Sentry;
     }
   }
 
-  private async generateFrontendPagesWithLLM(frontendPath: string, project: EngagementSpec): Promise<void> {
+  private async generateFrontendPagesWithLLM(frontendPath: string, project: EngagementSpec, routeContract?: RouteContract, topologyContract?: TraceTopologyContract | null): Promise<void> {
     console.log('🤖 Using LLM to generate Next.js pages with instrumentation...');
     const appPath = path.join(frontendPath, 'app');
 
@@ -571,9 +862,52 @@ module.exports = Sentry;
     }
 
     try {
+      // Fix 2 Sub-step A: Generate + validate InstrumentationDeclaration before code gen
+      let frontendDeclaration: InstrumentationDeclaration | undefined;
+      if (topologyContract) {
+        console.log('🐾 Generating frontend instrumentation declaration (pre-code plan)…');
+        const frontendSpanNames = topologyContract.spans
+          .filter(s => s.layer === 'frontend')
+          .map(s => s.name);
+        let decl = await this.llm.generateInstrumentationDeclaration('frontend', topologyContract, []);
+        let { valid, errors } = validateInstrumentationDeclaration(decl, frontendSpanNames);
+        if (!valid) {
+          // Retry once with error context
+          console.warn(`⚠ Declaration invalid: ${errors.join('; ')} — retrying…`);
+          decl = await this.llm.generateInstrumentationDeclaration('frontend', topologyContract, []);
+          ({ valid, errors } = validateInstrumentationDeclaration(decl, frontendSpanNames));
+          if (!valid) {
+            console.warn(`⚠ Declaration still invalid after retry: ${errors.join('; ')} — proceeding without grounding`);
+          }
+        }
+        if (valid) {
+          frontendDeclaration = decl;
+          console.log(`   ✓ Declaration valid — ${decl.spanCoverage.length} spans mapped`);
+        }
+      }
+
       console.log('📝 Generating pages with LLM...');
-      const { pages } = await this.llm.generateWebPages(project);
+      const { pages } = await this.llm.generateWebPages(project, routeContract, frontendDeclaration);
       console.log(`✅ LLM generated ${pages.length} Next.js pages`);
+
+      // ── Deterministic URL injection ───────────────────────────────────────
+      // Replace every fetch() URL in generated pages with the exact URL from
+      // the route contract. The LLM never needs to get URLs right.
+      if (routeContract && routeContract.routes.length > 0) {
+        const pagesMap = new Map(pages.map(p => [p.filename, p.code]));
+        const { files: patchedMap, reports } = injectContractUrls(pagesMap, routeContract);
+        if (reports.length > 0) {
+          for (const report of reports) {
+            console.log(`  ✓ URL-injected ${report.replacements.length} URL(s) in ${report.filename}`);
+          }
+          // Write patched code back to page objects
+          for (const page of pages) {
+            const patched = patchedMap.get(page.filename);
+            if (patched !== undefined) page.code = patched;
+          }
+        }
+      }
+      // ─────────────────────────────────────────────────────────────────────
 
       // Pre-write syntax gate: validate each page with the TypeScript compiler
       // before touching disk. If a page has syntax errors, run a fix-validate
@@ -596,14 +930,163 @@ module.exports = Sentry;
           }
         }
 
+        // Fix 3: Post-generation check before writing to disk
+        const contractSpanNames = project.instrumentation.spans
+          .filter(s => s.layer === 'frontend')
+          .map(s => s.name);
+        const postCheck = postGenerationCheck(code, contractSpanNames, page.filename);
+        if (!postCheck.clean) {
+          console.warn(`  ⚠ Post-generation issues in ${page.filename}:`);
+          postCheck.issues.forEach(i => console.warn(`    • ${i}`));
+          // Issues are logged as warnings; they'll be caught by static validator if they persist
+        }
+
         fs.writeFileSync(pagePath, code);
         console.log(`  ✓ Created ${page.filename}: ${page.description}`);
+
+        // ── Deterministic marker reconciliation ───────────────────────────
+        // Pass 1: strip invented markers (span names not in the contract)
+        const contractFESpans = (topologyContract?.spans ?? project.instrumentation.spans)
+          .filter(s => s.layer === 'frontend');
+        const contractFENames = contractFESpans.map(s => s.name);
+        const removed = removeForeignMarkers(pagePath, contractFENames);
+        if (removed.length > 0) {
+          console.warn(`  ✓ Removed ${removed.length} invented marker(s) from ${page.filename}: ${removed.join(', ')}`);
+        }
+
+        // Pass 2: fill markers the LLM missed, using route → fetch-URL matching
+        if (routeContract) {
+          const filled = fillMissingMarkersFromRoutes(pagePath, contractFESpans, routeContract);
+          if (filled.length > 0) {
+            console.log(`  ✓ Auto-injected ${filled.length} missing marker(s) into ${page.filename}: ${filled.join(', ')}`);
+          }
+        }
+
+        // Pass 3: normalise paraphrased span names (Jaccard similarity ≥ 0.6)
+        if (topologyContract) {
+          const corrections = normaliseSpanNames([pagePath], topologyContract);
+          if (corrections.length > 0) {
+            console.log(`  ✓ Normalised ${corrections.length} span name(s) in ${page.filename}`);
+          }
+        }
+        // ─────────────────────────────────────────────────────────────────
+
+        // ── UI structure check ────────────────────────────────────────────
+        // Verify the page contains form elements implied by its span markers.
+        // If inputs or submit buttons are missing, run one LLM repair pass.
+        if (topologyContract) {
+          const allFESpans = topologyContract.spans.filter(s => s.layer === 'frontend');
+          const missingElements = checkPageUIStructure(pagePath, allFESpans);
+          if (missingElements.length > 0) {
+            console.warn(`  ⚠ ${page.filename} missing UI elements: ${missingElements.join('; ')}`);
+            const currentSource = fs.readFileSync(pagePath, 'utf-8');
+            // Find which contract spans this page references via markers
+            const markerRe = /\/\/\s*INSTRUMENT:\s*([^\s—–\-][^\n—–]*)/g;
+            const markerNames: string[] = [];
+            let mm: RegExpExecArray | null;
+            while ((mm = markerRe.exec(currentSource)) !== null) {
+              markerNames.push(mm[1].trim().replace(/\s*[—–\-\s].*$/, '').trim());
+            }
+            const relevantSpans = allFESpans.filter(s => markerNames.includes(s.name));
+            const repairPrompt = buildUIRepairPrompt(currentSource, page.filename, missingElements, relevantSpans);
+            try {
+              const settings = this.storage.getSettings();
+              const fixed = await this.llm.callLLMDirect(
+                [{ role: 'user', content: repairPrompt }],
+                { baseUrl: settings.llm.baseUrl, apiKey: settings.llm.apiKey, model: settings.llm.model }
+              );
+              const cleaned = fixed.trim()
+                .replace(/^```(?:typescript|tsx|ts)?\n?/, '')
+                .replace(/\n?```[\s\S]*$/, '')
+                .trim();
+              if (cleaned.length > 100) {
+                fs.writeFileSync(pagePath, cleaned);
+                console.log(`  ✓ UI structure repaired in ${page.filename}`);
+              }
+            } catch (uiErr: any) {
+              console.warn(`  ⚠ UI structure repair failed for ${page.filename}: ${uiErr?.message}`);
+            }
+          }
+        }
+        // ─────────────────────────────────────────────────────────────────
+        // NOTE: Instrumentation injection (// INSTRUMENT: → trace_*() calls) is
+        // intentionally deferred. It runs after static topology validation so that
+        // the validator can inspect raw markers. See injectAllInstrumentation().
       }
 
       // Post-generation validation: fix any hallucinated instrumentation imports or API URLs.
       // We read the generated lib/instrumentation.ts to get ground-truth function names,
       // then check each page for invalid imports and run an LLM fix pass on offenders.
       await this.validateAndFixGeneratedPages(pages, appPath, frontendPath, project);
+
+      // Ensure the root page (/) is the app's primary entry point.
+      // The LLM often generates app/page.tsx as a post-action dashboard while placing
+      // the primary interaction (form, search, etc.) at a sub-route. Score pages using
+      // source-level signals so this works even before marker names are normalised.
+      {
+        const rootPagePath = path.join(frontendPath, 'app', 'page.tsx');
+        const appDir2 = path.join(frontendPath, 'app');
+
+        const INPUT_KW  = ['input', 'validate', 'email', 'password', 'signup', 'login', 'register', 'form', 'fill', 'search'];
+        const SUBMIT_KW = ['submit', 'send', 'create', 'checkout', 'confirm', 'save'];
+
+        interface PageScore { route: string; file: string; score: number }
+        const scores: PageScore[] = [];
+
+        for (const pg of pages) {
+          const pgPath = path.join(appPath, pg.filename);
+          if (!fs.existsSync(pgPath)) continue;
+          const src = fs.readFileSync(pgPath, 'utf-8');
+          const srcLower = src.toLowerCase();
+
+          // Raw marker count — doesn't require names to match contract
+          const markerCount = (src.match(/\/\/\s*INSTRUMENT:/g) ?? []).length;
+          // Form/input element presence
+          const hasForm  = /<form[\s>/]/i.test(src) ? 4 : 0;
+          const hasInput = /<input[\s/]/i.test(src) ? 4 : 0;
+          // Keyword hits directly in source text
+          const inputHits  = INPUT_KW.filter(kw => srcLower.includes(kw)).length;
+          const submitHits = SUBMIT_KW.filter(kw => srcLower.includes(kw)).length;
+          // Placeholder penalty — dashboard template pages score lower
+          const isPlaceholder = PLACEHOLDER_PATTERNS.some(p => p.test(src)) ? 3 : 0;
+
+          const score = markerCount * 3 + hasForm + hasInput + inputHits + submitHits * 2 - isPlaceholder;
+
+          // Derive route via path.relative so it works for any filename format
+          const relPath = path.relative(appDir2, pgPath).replace(/\\/g, '/');
+          const routePart = relPath.replace(/\/?page\.tsx$/, '');
+          const route = routePart === '' ? '/' : `/${routePart}`;
+
+          scores.push({ route, file: pgPath, score });
+        }
+
+        if (scores.length > 0) {
+          const rootScore = scores.find(s => s.route === '/')?.score ?? 0;
+          const best = scores.reduce((a, b) => b.score > a.score ? b : a);
+
+          if (best.route !== '/' && best.score > rootScore && fs.existsSync(rootPagePath)) {
+            const redirectSource =
+              `import { redirect } from 'next/navigation';\n\n` +
+              `// Root redirects to the primary entry point of this app.\n` +
+              `export default function Home() {\n` +
+              `  redirect('${best.route}');\n` +
+              `}\n`;
+            fs.writeFileSync(rootPagePath, redirectSource);
+            onOutput?.(`   ✓ Root page redirects to primary entry point: ${best.route}\n`);
+          }
+        }
+      }
+
+      // Extract DOM manifest for flow generation
+      const pageFilePaths = pages.map(p => path.join(appPath, p.filename)).filter(p => fs.existsSync(p));
+      if (pageFilePaths.length > 0) {
+        try {
+          extractDOMManifest(pageFilePaths, path.dirname(frontendPath));
+          console.log('   ✓ DOM manifest extracted');
+        } catch (e: any) {
+          console.warn(`   ⚠ DOM manifest extraction failed: ${e?.message}`);
+        }
+      }
 
       // Create globals.css
       const globalsCss = `@tailwind base;
@@ -2330,7 +2813,11 @@ PORT=3001
       }
 
       // Write routes file
-      fs.writeFileSync(path.join(backendPath, 'src', 'routes', 'api.ts'), code);
+      const routesFilePath = path.join(backendPath, 'src', 'routes', 'api.ts');
+      fs.writeFileSync(routesFilePath, code);
+
+      // NOTE: Instrumentation injection deferred — runs after static topology validation.
+      // See injectAllInstrumentation().
 
     } catch (error) {
       console.error('❌ Failed to generate routes with LLM:', error);
@@ -2382,27 +2869,34 @@ PORT=3001
     }
   }
 
-  private generateBackendRoutes(backendPath: string, project: EngagementSpec): void {
-    const backendSpans = project.instrumentation.spans.filter(s => s.layer === 'backend');
+  private generateBackendRoutes(backendPath: string, project: EngagementSpec, routeContract?: RouteContract): void {
+    // Use ALL spans when a route contract is available — the frontend calls every span,
+    // not just backend-layer ones. Without this, frontend-layer spans produce 404s.
+    const allSpans = project.instrumentation.spans;
+    const backendSpans = routeContract ? allSpans : allSpans.filter(s => s.layer === 'backend');
 
     // Build import list from actual spans
-    const spanFnNames = backendSpans.map(s => `trace_${s.name.replace(/\./g, '_')}`);
+    const spanFnNames = allSpans.map(s => `trace_${s.name.replace(/\./g, '_')}`);
     const importsLine = spanFnNames.length > 0
       ? `const { ${spanFnNames.join(', ')} } = require('../utils/instrumentation');`
       : `// No backend spans defined — add instrumentation below`;
 
-    // Generate one route per backend span — derive unique path from span.name (not span.op)
-    // to guarantee each span gets its own route regardless of how many spans share the same op.
+    // Generate one route per span — when a route contract is available, use exact contract paths.
+    // Otherwise derive from span.name to guarantee each span gets its own route.
     const spanRoutes = backendSpans.map(span => {
       const fnName = `trace_${span.name.replace(/\./g, '_')}`;
       // Use span.name to build a unique, hierarchical route path, e.g.:
       //   product.fetch_details → /product/fetch-details
       //   checkout.init         → /checkout/init
-      // This matches the derivation in the LLM prompts so FE and BE always agree.
+      // Use exact path from route contract when available — guarantees FE/BE agreement.
+      const contractRoute = routeContract?.routes.find(r => r.spanName === span.name);
       const nameParts = span.name.split('.');
-      const routePath = nameParts.length === 1
+      const routePath = contractRoute
+        ? contractRoute.path
+        : nameParts.length === 1
         ? `/api/${nameParts[0].replace(/_/g, '-')}`
         : `/api/${nameParts[0]}/${nameParts.slice(1).join('/').replace(/_/g, '-')}`;
+      const contractMethod = contractRoute?.method.toLowerCase();
       const attrEntries = Object.keys(span.attributes)
         .map(k => {
           // Quote keys with dots (OTel conventions like 'http.method') — unquoted are JS syntax errors
@@ -2411,12 +2905,11 @@ PORT=3001
         })
         .join(',\n');
       const attrObj = attrEntries ? `{\n${attrEntries}\n    }` : '{}';
-      // Use span.name (not span.op) to determine HTTP method — op values like 'operation' or 'product'
-      // give no signal, but the action part of the name (fetch, load, search, filter, get) does.
+      // Use contract method when available; otherwise derive from span name keywords.
       const isGet = ['fetch', 'load', 'get', 'list', 'read', 'query', 'search', 'filter', 'view', 'show', 'detail', 'retrieve'].some(
         v => span.name.toLowerCase().includes(v)
       );
-      const method = isGet ? 'get' : 'post';
+      const method = contractMethod || (isGet ? 'get' : 'post');
 
       // For read-type spans, also generate a RESTful GET /namespace alias so the frontend's
       // natural REST calls (e.g. GET /api/products) are handled in addition to the
@@ -2431,7 +2924,7 @@ router.get('/api/${namespace}', async (req, res) => {
       await new Promise(resolve => setTimeout(resolve, Math.floor(Math.random() * 300) + 50));
       return { id: Date.now(), status: 'ok', operation: '${span.name}' };
     }, ${attrObj});
-    res.json({ success: true, ...result });
+    res.json({ success: true, ...(result as Record<string, unknown>) });
   } catch (error) {
     Sentry.captureException(error);
     res.status(500).json({ error: '${span.name} failed' });
@@ -2458,7 +2951,7 @@ router.${method}('${routePath}', async (req, res) => {
           'http.method': req.method,
           'http.route': '${routePath}',
         });
-        res.json({ success: true, ...result });
+        res.json({ success: true, ...(result as Record<string, unknown>) });
       } catch (error) {
         Sentry.captureException(error);
         res.status(500).json({ error: '${span.name} failed' });
@@ -2486,6 +2979,19 @@ module.exports = router;
 export {};
 `;
     fs.writeFileSync(path.join(backendPath, 'src', 'routes', 'api.ts'), routesFile);
+
+    // Normalise trace function names in api.ts against actual instrumentation exports.
+    // The LLM sometimes uses frontend span naming conventions in backend routes
+    // (e.g. trace_signup_submit_form instead of trace_backend_submit_form).
+    // This deterministic pass fixes the mismatch before the TypeScript build runs.
+    const instrumentationPath = path.join(backendPath, 'src', 'instrumentation.ts');
+    const apiPath = path.join(backendPath, 'src', 'routes', 'api.ts');
+    if (fs.existsSync(instrumentationPath)) {
+      const renames = normaliseTraceFunctionNames(apiPath, instrumentationPath);
+      if (renames.length > 0) {
+        console.log(`[generator] Normalised ${renames.length} trace function name(s) in api.ts`);
+      }
+    }
   }
 
   private generateBackendInstrumentation(backendPath: string, project: EngagementSpec): void {
@@ -2518,7 +3024,7 @@ ${rulesComment}
 ${allSpans.map(span => {
   const attrSetup = opAttrs(span.op);
   return `
-exports.trace_${span.name.replace(/\./g, '_')} = function(
+module.exports.trace_${span.name.replace(/\./g, '_')} = function(
   callback,
   attributes = {}
 ) {
@@ -2557,6 +3063,75 @@ export {};
 `;
 
     fs.writeFileSync(path.join(backendPath, 'src', 'utils', 'instrumentation.ts'), instrumentationFile);
+  }
+
+  /**
+   * Walk all frontend pages and backend routes, inject instrumentation into each,
+   * and run correctness assertions. Called once after static topology validation
+   * and the repair loop, so the validator saw clean marker-level code.
+   */
+  private injectAllInstrumentation(
+    appPath: string,
+    project: EngagementSpec,
+    onOutput?: (msg: string) => void
+  ): void {
+    const isPython = project.stack.backend === 'flask' || project.stack.backend === 'fastapi';
+    const frontendPath = path.join(appPath, 'frontend');
+    const backendPath  = isPython ? appPath : path.join(appPath, 'backend');
+
+    // ── Frontend pages ────────────────────────────────────────────────────
+    const feInstrPath = path.join(frontendPath, 'lib', 'instrumentation.ts');
+    if (!isPython && fs.existsSync(feInstrPath)) {
+      const appDir = path.join(frontendPath, 'app');
+      const pageFiles: string[] = [];
+      const walk = (dir: string) => {
+        if (!fs.existsSync(dir)) return;
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory() && entry.name !== 'node_modules' && entry.name !== '.next') walk(full);
+          else if (entry.isFile() && /\.(tsx|ts)$/.test(entry.name)) pageFiles.push(full);
+        }
+      };
+      walk(appDir);
+
+      let injected = 0;
+      for (const pageFile of pageFiles) {
+        try {
+          const result = injectInstrumentation(pageFile, feInstrPath);
+          if (result.injected) injected++;
+
+          const violations = assertInjectionCorrectness(pageFile);
+          if (violations.length > 0) {
+            onOutput?.(`   ⚠ Injection violations in ${path.basename(pageFile)}: ${violations.join('; ')}\n`);
+          }
+          const invented = assertNoInventedTraceFunctions(pageFile, feInstrPath);
+          if (invented.length > 0) {
+            onOutput?.(`   ⚠ Invented trace functions in ${path.basename(pageFile)}: ${invented.join(', ')}\n`);
+          }
+        } catch (err: any) {
+          onOutput?.(`   ⚠ Injection skipped for ${path.basename(pageFile)}: ${err?.message}\n`);
+        }
+      }
+      onOutput?.(`   ✓ Frontend: injected into ${injected}/${pageFiles.length} page file(s)\n`);
+    }
+
+    // ── Backend routes ────────────────────────────────────────────────────
+    const beInstrPath = path.join(backendPath, 'src', 'utils', 'instrumentation.ts');
+    const routesFile  = path.join(backendPath, 'src', 'routes', 'api.ts');
+    if (!isPython && fs.existsSync(routesFile) && fs.existsSync(beInstrPath)) {
+      try {
+        const result = injectInstrumentation(routesFile, beInstrPath);
+        if (result.injected) {
+          onOutput?.('   ✓ Backend: instrumentation injected into api.ts\n');
+        }
+        const violations = assertInjectionCorrectness(routesFile);
+        if (violations.length > 0) {
+          onOutput?.(`   ⚠ Injection violations in api.ts: ${violations.join('; ')}\n`);
+        }
+      } catch (err: any) {
+        onOutput?.(`   ⚠ Backend injection skipped: ${err?.message}\n`);
+      }
+    }
   }
 
   private generateConfigFiles(appPath: string, project: EngagementSpec): void {

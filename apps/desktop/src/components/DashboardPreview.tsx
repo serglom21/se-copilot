@@ -259,7 +259,7 @@ export default function DashboardPreview({ dashboardPath }: DashboardPreviewProp
     <div className="space-y-4">
       <div>
         <h3 className="text-lg font-semibold text-gray-900 mb-1">{dashboard.title}</h3>
-        <p className="text-sm text-gray-500">Preview of your Sentry dashboard</p>
+        <p className="text-sm text-gray-500">Dashboard preview — sniffed from your traces</p>
       </div>
 
       {/* KPI row */}

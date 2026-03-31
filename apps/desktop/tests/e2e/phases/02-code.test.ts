@@ -1,0 +1,215 @@
+/**
+ * Phase 02 — Code structure assertions
+ * Validates generated source files against the frozen contract.
+ */
+import { describe, test, expect, beforeAll } from 'vitest'
+import fs from 'fs'
+import path from 'path'
+import { TraceTopologyContract, loadTopologyContract } from '../../../electron/services/trace-topology-contract'
+import { runStaticTopologyValidation } from '../../../electron/services/static-topology-validator'
+import { extractExports } from '../../../electron/services/instrumentation-injector'
+import { E2E_OUTPUT_DIR } from '../fixture'
+import { RouteContract } from '../../../electron/services/route-contract'
+
+let contract: TraceTopologyContract
+let appPath: string
+
+beforeAll(() => {
+  appPath = path.join(E2E_OUTPUT_DIR, 'reference-app')
+  const loaded = loadTopologyContract(E2E_OUTPUT_DIR)
+  if (!loaded) throw new Error('topology-contract.json not found — run Phase 01 first')
+  contract = loaded
+})
+
+describe('Phase 02 — Static topology validation', () => {
+  test('static validator passes with zero errors on generated code', () => {
+    const result = runStaticTopologyValidation(contract, appPath)
+    if (!result.passed) {
+      console.error('Static validation errors:')
+      result.errors.forEach(e => console.error(`  [${e.type}] ${e.spanName ?? ''}: ${e.expected}`))
+    }
+    expect(result.passed).toBe(true)
+  })
+
+  test('no invented spans (no markers for spans outside contract)', () => {
+    const result = runStaticTopologyValidation(contract, appPath)
+    const invented = result.issues.filter(i => i.type === 'invented_span')
+    expect(invented, `Invented spans: ${invented.map(i => i.spanName).join(', ')}`).toHaveLength(0)
+  })
+
+  test('frontend/sentry.client.config.ts exists and has no JSX', () => {
+    const configPath = path.join(appPath, 'frontend', 'sentry.client.config.ts')
+    expect(fs.existsSync(configPath)).toBe(true)
+    const content = fs.readFileSync(configPath, 'utf8')
+    expect(content).not.toMatch(/<[A-Z][a-zA-Z]+[\s/>]/) // no JSX components
+    expect(content).toContain('Sentry.init(')
+  })
+
+  test('frontend instrumentation.ts has Sentry import', () => {
+    const candidates = [
+      path.join(appPath, 'frontend', 'lib', 'instrumentation.ts'),
+      path.join(appPath, 'frontend', 'src', 'lib', 'instrumentation.ts'),
+    ]
+    const instrFile = candidates.find(p => fs.existsSync(p))
+    if (!instrFile) return // not all stacks generate this file
+    const content = fs.readFileSync(instrFile, 'utf8')
+    expect(content).toContain("import * as Sentry from '@sentry/nextjs'")
+  })
+
+  test('at least one data-testid selector exists in generated pages', () => {
+    const pagesDir = path.join(appPath, 'frontend', 'app')
+    if (!fs.existsSync(pagesDir)) return
+    const files = walkDir(pagesDir, ['.tsx', '.jsx'])
+    const allContent = files.map(f => fs.readFileSync(f, 'utf8')).join('\n')
+    expect(allContent).toContain('data-testid=')
+  })
+
+  test('dom-manifest.json exists and has selectors', () => {
+    const manifestPath = path.join(E2E_OUTPUT_DIR, 'dom-manifest.json')
+    if (!fs.existsSync(manifestPath)) return // optional artifact
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+    expect(manifest).toHaveProperty('pages')
+    expect(Array.isArray(manifest.pages)).toBe(true)
+  })
+
+  // 02-M: No undefined trace_* calls — LLM must not invent instrumentation function calls
+  test('02-M: no undefined trace_* function calls in generated frontend pages', () => {
+    const pagesDir = path.join(appPath, 'frontend', 'app')
+    if (!fs.existsSync(pagesDir)) return
+
+    const instrCandidates = [
+      path.join(appPath, 'frontend', 'lib', 'instrumentation.ts'),
+      path.join(appPath, 'frontend', 'src', 'lib', 'instrumentation.ts'),
+    ]
+    const instrFile = instrCandidates.find(p => fs.existsSync(p))
+    if (!instrFile) return // no instrumentation file — skip
+
+    const knownExports = extractExports(instrFile)
+    const pageFiles = walkDir(pagesDir, ['.tsx', '.ts', '.jsx', '.js'])
+    const invented: string[] = []
+
+    for (const file of pageFiles) {
+      const content = fs.readFileSync(file, 'utf8')
+      const callRe = /\btrace_\w+(?=\s*\()/g
+      let m: RegExpExecArray | null
+      while ((m = callRe.exec(content)) !== null) {
+        const fn = m[0]
+        if (!knownExports.has(fn) && !invented.includes(fn)) {
+          invented.push(fn)
+        }
+      }
+    }
+
+    expect(
+      invented,
+      `Invented trace_* calls (not in instrumentation.ts): ${invented.join(', ')}`
+    ).toHaveLength(0)
+  })
+
+  // 02-O: All fetch() URLs in generated pages resolve to a known route contract path
+  test('02-O: all fetch() URLs in frontend pages match a route contract entry', () => {
+    const pagesDir = path.join(appPath, 'frontend', 'app')
+    if (!fs.existsSync(pagesDir)) return
+
+    const routeContractPath = path.join(E2E_OUTPUT_DIR, 'route-contract.json')
+    if (!fs.existsSync(routeContractPath)) return // generated by the pipeline — skip if absent
+    const routeContract: RouteContract = JSON.parse(fs.readFileSync(routeContractPath, 'utf8'))
+    const knownPaths = new Set(routeContract.routes.map(r => r.path))
+
+    const pageFiles = walkDir(pagesDir, ['.tsx', '.ts', '.jsx', '.js'])
+    const unmatched: string[] = []
+
+    const fetchRe = /fetch\(\s*['"`]((?:https?:\/\/[^'"`]*)?\/api\/[^'"`]+)['"`]/g
+    for (const file of pageFiles) {
+      const content = fs.readFileSync(file, 'utf8')
+      let m: RegExpExecArray | null
+      while ((m = fetchRe.exec(content)) !== null) {
+        const url = m[1]
+        const urlPath = url.replace(/^https?:\/\/[^/]+/, '')
+        if (!knownPaths.has(urlPath)) {
+          unmatched.push(`${path.basename(file)}: ${url}`)
+        }
+      }
+    }
+
+    expect(
+      unmatched,
+      `Fetch URLs not in route contract:\n${unmatched.join('\n')}`
+    ).toHaveLength(0)
+  })
+
+  // 02-P: No paraphrased span name markers remain — normalisation must have run
+  test('02-P: no paraphrased // INSTRUMENT: markers remain in generated pages', () => {
+    const pagesDir = path.join(appPath, 'frontend', 'app')
+    if (!fs.existsSync(pagesDir)) return
+
+    const contractNames = new Set(contract.spans.map(s => s.name))
+    const pageFiles = walkDir(pagesDir, ['.tsx', '.ts', '.jsx', '.js'])
+    const paraphrased: string[] = []
+
+    const markerRe = /\/\/\s*INSTRUMENT:\s*([^\s—–\-][^\n—–]*)/g
+    for (const file of pageFiles) {
+      const content = fs.readFileSync(file, 'utf8')
+      let m: RegExpExecArray | null
+      while ((m = markerRe.exec(content)) !== null) {
+        const name = m[1].trim().replace(/\s*[—–\-\s].*$/, '').trim()
+        if (!contractNames.has(name)) {
+          paraphrased.push(`${path.basename(file)}: "${name}"`)
+        }
+      }
+    }
+
+    expect(
+      paraphrased,
+      `Non-contract INSTRUMENT markers found (normalisation may not have run):\n${paraphrased.join('\n')}`
+    ).toHaveLength(0)
+  })
+
+  // 02-Q: topology-contract.json has a briefHash (stale-contract detection is active)
+  test('02-Q: topology contract has a briefHash field', () => {
+    expect(contract.briefHash).toBeDefined()
+    expect(typeof contract.briefHash).toBe('string')
+    expect(contract.briefHash!.length).toBeGreaterThan(0)
+  })
+
+  // 02-N: No duplicate const declarations in generated pages
+  test('02-N: no duplicate const declarations in generated frontend pages', () => {
+    const pagesDir = path.join(appPath, 'frontend', 'app')
+    if (!fs.existsSync(pagesDir)) return
+
+    const pageFiles = walkDir(pagesDir, ['.tsx', '.ts', '.jsx', '.js'])
+    const duplicates: string[] = []
+
+    for (const file of pageFiles) {
+      const content = fs.readFileSync(file, 'utf8')
+      const constRe = /\bconst\s+(\w+)\s*=/g
+      const counts = new Map<string, number>()
+      let m: RegExpExecArray | null
+      while ((m = constRe.exec(content)) !== null) {
+        const name = m[1]
+        counts.set(name, (counts.get(name) ?? 0) + 1)
+      }
+      for (const [name, count] of counts) {
+        if (count > 1) {
+          duplicates.push(`${path.basename(file)}: const ${name} (×${count})`)
+        }
+      }
+    }
+
+    expect(
+      duplicates,
+      `Duplicate const declarations found:\n${duplicates.join('\n')}`
+    ).toHaveLength(0)
+  })
+})
+
+function walkDir(dir: string, exts: string[]): string[] {
+  const results: string[] = []
+  if (!fs.existsSync(dir)) return results
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name)
+    if (entry.isDirectory()) results.push(...walkDir(full, exts))
+    else if (exts.some(e => entry.name.endsWith(e))) results.push(full)
+  }
+  return results
+}

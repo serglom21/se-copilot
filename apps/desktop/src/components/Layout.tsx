@@ -30,11 +30,11 @@ export default function Layout() {
         <div className="px-4 py-5 border-b border-sentry-border">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-md bg-sentry-gradient flex items-center justify-center text-base shadow-sentry shrink-0">
-              ◈
+              🐾
             </div>
             <div>
-              <div className="text-sm font-semibold text-gradient leading-none">SE Copilot</div>
-              <div className="text-[10px] text-white/35 mt-0.5">Demo Builder</div>
+              <div className="text-sm font-semibold text-gradient leading-none">Pawprint</div>
+              <div className="text-[10px] text-white/35 mt-0.5">Leave a trace everywhere</div>
             </div>
           </div>
         </div>

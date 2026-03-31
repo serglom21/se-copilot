@@ -2,7 +2,7 @@
   "name": "@se-copilot/desktop",
   "version": "0.1.0",
   "main": "dist-electron/main.js",
-  "description": "SE Copilot Desktop App",
+  "description": "Pawprint — Leave a trace everywhere",
   "author": "Sentry",
   "private": true,
   "scripts": {
@@ -10,7 +10,10 @@
     "build": "vite build && electron-builder",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
-    "test": "vitest"
+    "test": "vitest run tests/unit",
+    "test:unit": "vitest run tests/unit",
+    "test:e2e": "npx tsx tests/e2e/runner.ts && npx vitest run tests/e2e/phases",
+    "test:e2e:assert": "npx vitest run tests/e2e/phases"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.0.5",
@@ -20,10 +23,12 @@
     "@sentry/electron": "^7.7.1",
     "@sentry/node": "^10.38.0",
     "@sentry/react": "^10.38.0",
+    "@types/diff": "^8.0.0",
     "better-sqlite3": "^9.2.2",
     "bufferutil": "^4.1.0",
     "chance": "^1.1.13",
     "clsx": "^2.1.0",
+    "diff": "^8.0.4",
     "dotenv": "^17.3.1",
     "lucide-react": "^0.577.0",
     "puppeteer": "^24.36.1",
@@ -32,6 +37,7 @@
     "react-router-dom": "^6.21.1",
     "recharts": "^2.15.4",
     "simple-git": "^3.22.0",
+    "ts-morph": "^27.0.2",
     "utf-8-validate": "^6.0.6",
     "zod": "^3.22.4",
     "zustand": "^4.4.7"
@@ -54,8 +60,8 @@
     "vitest": "^1.1.1"
   },
   "build": {
-    "appId": "io.sentry.secopilot",
-    "productName": "SE Copilot",
+    "appId": "io.sentry.pawprint",
+    "productName": "Pawprint",
     "directories": {
       "output": "release"
     },

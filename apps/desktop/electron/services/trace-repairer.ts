@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import { CapturedTrace, CapturedSpan } from './trace-ingest';
 import { TraceIssue } from './trace-validator';
 import { EngagementSpec } from '../../src/types/spec';
@@ -287,4 +289,96 @@ export function getRepairedSpanIds(
     }
   }
   return mutated;
+}
+
+export interface PatchResult {
+  file: string;
+  spanName: string;
+  wrongOp: string;
+  correctOp: string;
+  applied: boolean;
+}
+
+/**
+ * Patch source files to fix nonstandard op values.
+ * This is a deterministic string replacement — never needs LLM.
+ * Run after repairTraces() to fix the source code that generated wrong ops.
+ */
+export function patchSpanOps(
+  issues: TraceIssue[],
+  projectDir: string
+): PatchResult[] {
+  const nonstandardOps = issues.filter(i => i.kind === 'nonstandard_op' && i.fixable && OP_REMAP[i.spanName ?? '']);
+  // Also look for ops that are in OP_REMAP by their current op value
+  const opIssues = issues.filter(i =>
+    i.kind === 'nonstandard_op' &&
+    i.fixable &&
+    i.detail.includes('deprecated op')
+  );
+
+  const patches: PatchResult[] = [];
+  if (opIssues.length === 0) return patches;
+
+  // Find all TS/JS files in the project
+  const projectFiles = findSourceFiles(projectDir);
+
+  for (const issue of opIssues) {
+    // Extract wrong and correct ops from the detail string
+    // Format: 'Span "..." uses deprecated op "X" — should be "Y"'
+    const match = issue.detail.match(/deprecated op "([^"]+)" — should be "([^"]+)"/);
+    if (!match) continue;
+    const [, wrongOp, correctOp] = match;
+
+    let applied = false;
+    for (const file of projectFiles) {
+      try {
+        const content = fs.readFileSync(file, 'utf8');
+        // Look for op: 'wrongOp' or op: "wrongOp" near the span name
+        const hasWrongOp = content.includes(`'${wrongOp}'`) || content.includes(`"${wrongOp}"`);
+        if (!hasWrongOp) continue;
+
+        const updated = content
+          .replace(new RegExp(`(['"])${escapeRegex(wrongOp)}\\1`, 'g'), `$1${correctOp}$1`);
+
+        if (updated !== content) {
+          fs.writeFileSync(file, updated, 'utf8');
+          applied = true;
+          console.log(`[patchSpanOps] Fixed op "${wrongOp}" → "${correctOp}" in ${path.basename(file)}`);
+        }
+      } catch { /* skip unreadable files */ }
+    }
+
+    patches.push({
+      file: projectDir,
+      spanName: issue.spanName ?? '',
+      wrongOp,
+      correctOp,
+      applied
+    });
+  }
+
+  return patches;
+}
+
+function findSourceFiles(dir: string): string[] {
+  const results: string[] = [];
+  if (!fs.existsSync(dir)) return results;
+
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory() && !['node_modules', '.next', 'dist', '.git'].includes(entry.name)) {
+        results.push(...findSourceFiles(full));
+      } else if (entry.isFile() && /\.(ts|tsx|js|jsx|py)$/.test(entry.name)) {
+        results.push(full);
+      }
+    }
+  } catch { /* skip permission errors */ }
+
+  return results;
+}
+
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

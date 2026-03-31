@@ -31,6 +31,7 @@ export default function GeneratePage() {
 
   // Build validation log
   const [buildLog, setBuildLog] = useState<string[]>([]);
+  const [validationDone, setValidationDone] = useState(false);
   const buildLogRef = useRef<HTMLDivElement>(null);
   const outputCleanupRef = useRef<(() => void) | null>(null);
 
@@ -69,6 +70,7 @@ export default function GeneratePage() {
 
     if (outputCleanupRef.current) outputCleanupRef.current();
     setBuildLog([]);
+    setValidationDone(false);
     const outputCleanup = window.electronAPI.onGenerationOutput((line) => {
       setBuildLog(prev => [...prev, line].slice(-200));
     });
@@ -92,6 +94,7 @@ export default function GeneratePage() {
       const result = await generateApp();
       if (!result.success) throw new Error(result.error);
       setStatus(s => ({ ...s, app: { generated: true, loading: false, path: result.outputPath || '' } }));
+      setValidationDone(true);
       if (currentProject) {
         await window.electronAPI.updateProject(currentProject.id, { status: 'generated' });
         await loadProject(currentProject.id);
@@ -246,8 +249,15 @@ export default function GeneratePage() {
       {buildLog.length > 0 && (
         <div className="mb-5 border border-sentry-border rounded-lg bg-black/40 overflow-hidden">
           <div className="px-3 py-1.5 border-b border-sentry-border flex items-center justify-between">
-            <span className="text-[11px] text-white/40 uppercase tracking-wide font-medium">Build Validation Log</span>
-            <button onClick={() => setBuildLog([])} className="text-[11px] text-white/25 hover:text-white/50">Clear</button>
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] text-white/40 uppercase tracking-wide font-medium">Build Validation Log</span>
+              {validationDone && (
+                <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-green-500/15 text-green-400 border border-green-500/25">
+                  ✓ Validation complete
+                </span>
+              )}
+            </div>
+            <button onClick={() => { setBuildLog([]); setValidationDone(false); }} className="text-[11px] text-white/25 hover:text-white/50">Clear</button>
           </div>
           <div ref={buildLogRef} className="p-3 max-h-40 overflow-y-auto font-mono text-[11px] text-white/60 whitespace-pre-wrap leading-relaxed">
             {buildLog.join('')}

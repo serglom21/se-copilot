@@ -125,14 +125,58 @@ export class LiveDataGeneratorService {
       }
       fs.writeFileSync(flowsPath, JSON.stringify(userFlows, null, 2));
 
+      // --- Flow Coverage Proof (deterministic, pre-Puppeteer) ---
+      const { loadTopologyContract } = await import('./trace-topology-contract');
+      const { computeFlowCoverageProof, validateFlowSelectors, formatCoverageProofSummary, formatCoverageGapForReReason } = await import('./flow-coverage-proof');
+      const contract = loadTopologyContract(outputPath);
+      if (contract) {
+        const coverageProof = computeFlowCoverageProof(contract, userFlows);
+        onOutput(`🐾 ${formatCoverageProofSummary(coverageProof)}\n`);
+
+        if (coverageProof.uncoveredSpans.length > 0 && this.llmService) {
+          onOutput(`   ⚠ Uncovered spans — re-reasoning flows...\n`);
+          const gapPrompt = formatCoverageGapForReReason(coverageProof, contract);
+          try {
+            const fixedFlows = await this.generateIntelligentFlows(project, appPath, onOutput, gapPrompt);
+            const recheck = computeFlowCoverageProof(contract, fixedFlows);
+            if (recheck.coveragePercent > coverageProof.coveragePercent) {
+              userFlows = fixedFlows;
+              fs.writeFileSync(flowsPath, JSON.stringify(userFlows, null, 2));
+              onOutput(`   ✓ Coverage improved to ${recheck.coveragePercent}%\n`);
+            } else {
+              onOutput(`   ℹ️  Re-reason did not improve coverage — proceeding with partial coverage\n`);
+            }
+          } catch {
+            onOutput(`   ℹ️  Could not re-reason flows — proceeding with partial coverage\n`);
+          }
+        }
+
+        const selectorResult = validateFlowSelectors(userFlows);
+        if (!selectorResult.valid) {
+          onOutput(`   ⚠ ${selectorResult.issues.length} flow step(s) use bare CSS selectors instead of data-testid\n`);
+        }
+        onOutput('\n');
+      }
+
       onOutput('🚀 Starting Live Data Generator\n');
       onOutput('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n');
 
-      // Step 1: Configure environment — route through local proxy at 100% sample rate
+      // Always capture through local proxy first so the validate→repair pipeline
+      // can run. If a real Sentry project is selected, Step 9 will forward the
+      // validated traces there. If not, traces stay local only.
+      const hasRealProject = !!(config.frontendDsn || config.backendDsn);
+
+      // Step 1: Configure environment — always route through local proxy
       onOutput('📝 Step 1: Configuring Sentry DSNs (local proxy)...\n');
       const localDsn = traceIngestService.getLocalDsn();
       await this.configureDsns(appPath, config, project, true, localDsn);
-      onOutput(`   ✓ DSNs configured → ${localDsn}\n\n`);
+      onOutput(`   ✓ DSNs configured → ${localDsn}\n`);
+      if (hasRealProject) {
+        onOutput(`   ✓ Real Sentry project selected — validated traces will be forwarded in Step 9\n`);
+      } else {
+        onOutput(`   ℹ️  No Sentry project selected — traces will be validated locally only\n`);
+      }
+      onOutput('\n');
 
       // Step 2: Install dependencies if needed
       onOutput('📦 Step 2: Checking dependencies...\n');
@@ -187,7 +231,7 @@ export class LiveDataGeneratorService {
 
       onOutput('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
       onOutput('⏳ Waiting for traces to settle...\n');
-      let traces = await traceIngestService.waitForAllQuiet(2000);
+      const traces = await traceIngestService.waitForAllQuiet(2000);
       onOutput(`   ✓ ${traces.length} traces captured\n\n`);
 
       // Step 8: Validate → Repair loop
@@ -196,132 +240,142 @@ export class LiveDataGeneratorService {
       const llmConfig = { baseUrl: settings.llm.baseUrl, apiKey: settings.llm.apiKey, model: settings.llm.model };
       const MAX_ATTEMPTS = 4;
 
-      let repairedTraces = traces;
-      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-        const { validateTraces, summarizeIssues } = await import('./trace-validator');
-        const { repairTraces, getRepairedSpanIds } = await import('./trace-repairer');
-        const { surgicalRepair, getFlowsToRerun } = await import('./surgical-repairer');
+      {
+        let repairedTraces = traces;
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+          const { validateTraces, summarizeIssues } = await import('./trace-validator');
+          const { repairTraces, getRepairedSpanIds } = await import('./trace-repairer');
+          const { surgicalRepair, getFlowsToRerun } = await import('./surgical-repairer');
 
-        const issues = validateTraces(repairedTraces, project, userFlows);
-        if (issues.length === 0) {
-          onOutput(`   ✅ All traces valid (attempt ${attempt})\n\n`);
-          break;
-        }
-
-        const warnings = issues.filter(i => i.severity === 'warning');
-        const errors = issues.filter(i => i.severity !== 'warning');
-        onOutput(`   Attempt ${attempt}/${MAX_ATTEMPTS}: ${errors.length} errors, ${warnings.length} warnings — ${summarizeIssues(errors)}\n`);
-
-        // Auto-repair fixable issues in-memory
-        const fixable = issues.filter(i => i.fixable);
-        if (fixable.length > 0) {
-          repairedTraces = repairTraces(repairedTraces, fixable, project);
-          onOutput(`   🔧 Auto-repaired ${fixable.length} issues\n`);
-        }
-
-        // Surgical repair for non-fixable errors (skip on last attempt)
-        const nonFixable = errors.filter(i => !i.fixable);
-        if (nonFixable.length > 0 && attempt < MAX_ATTEMPTS) {
-          // Group issues by repairTarget so each file is patched once with ALL
-          // its issues in a single LLM call (avoids "LLM returned no changes"
-          // from patching the same file multiple times in sequence).
-          const byTarget = new Map<string, typeof nonFixable>();
-          for (const issue of nonFixable) {
-            if (issue.repairTarget === 'flows') continue;
-            const key = issue.repairTarget;
-            if (!byTarget.has(key)) byTarget.set(key, []);
-            byTarget.get(key)!.push(issue);
+          const issues = validateTraces(repairedTraces, project, userFlows);
+          if (issues.length === 0) {
+            onOutput(`   ✅ All traces valid (attempt ${attempt})\n\n`);
+            break;
           }
 
-          let needsBackendRestart = false;
-          let needsFrontendRestart = false;
+          const warnings = issues.filter(i => i.severity === 'warning');
+          const errors = issues.filter(i => i.severity !== 'warning');
+          onOutput(`   Attempt ${attempt}/${MAX_ATTEMPTS}: ${errors.length} errors, ${warnings.length} warnings — ${summarizeIssues(errors)}\n`);
 
-          for (const [, issueGroup] of byTarget) {
-            const patched = await surgicalRepair(
-              issueGroup, attempt, appPath, project, userFlows, llmConfig, onOutput,
-              this.llmService ?? undefined
-            );
-            if (patched.length > 0) {
-              if (patched.some(f => f.includes('backend') || f.endsWith('.py'))) needsBackendRestart = true;
-              if (patched.some(f => f.includes('frontend') || f.includes('sentry.client'))) needsFrontendRestart = true;
+          // Auto-repair fixable issues in-memory
+          const fixable = issues.filter(i => i.fixable);
+          if (fixable.length > 0) {
+            repairedTraces = repairTraces(repairedTraces, fixable, project);
+            onOutput(`   🔧 Auto-repaired ${fixable.length} issues\n`);
+          }
+
+          // Surgical repair for non-fixable errors (skip on last attempt)
+          const nonFixable = errors.filter(i => !i.fixable);
+          if (nonFixable.length > 0 && attempt < MAX_ATTEMPTS) {
+            // Group issues by repairTarget so each file is patched once with ALL
+            // its issues in a single LLM call (avoids "LLM returned no changes"
+            // from patching the same file multiple times in sequence).
+            const byTarget = new Map<string, typeof nonFixable>();
+            for (const issue of nonFixable) {
+              if (issue.repairTarget === 'flows') continue;
+              const key = issue.repairTarget;
+              if (!byTarget.has(key)) byTarget.set(key, []);
+              byTarget.get(key)!.push(issue);
             }
-          }
 
-          // Restart servers once after all patches are applied
-          if (needsBackendRestart) {
-            onOutput('   🔄 Restarting backend...\n');
-            await this.restartBackend(appPath, project, onOutput, onError);
-          }
-          if (needsFrontendRestart && project.stack.type !== 'backend-only') {
-            onOutput('   🔄 Restarting frontend...\n');
-            await this.restartFrontend(appPath, project, onOutput, onError);
-          }
+            let needsBackendRestart = false;
+            let needsFrontendRestart = false;
 
-          // Re-run targeted flows to capture the missing spans.
-          // Clear the trace buffer first so each attempt validates a fresh set
-          // of traces — otherwise error counts grow unboundedly as traces accumulate.
-          const flowsToRerun = getFlowsToRerun(nonFixable, userFlows);
-          if (flowsToRerun.length > 0) {
-            onOutput(`   🔁 Re-running ${flowsToRerun.length} flows: ${flowsToRerun.map(f => f.name).join(', ')}\n`);
-            traceIngestService.clear(); // ← fresh slate for this attempt
-            for (const flow of flowsToRerun) {
-              try {
-                await this.executeFlow(flow, false, project, onOutput);
-              } catch (err) {
-                onOutput(`   ⚠️ Re-run flow error: ${err}\n`);
+            for (const [, issueGroup] of byTarget) {
+              const patched = await surgicalRepair(
+                issueGroup, attempt, appPath, project, userFlows, llmConfig, onOutput,
+                this.llmService ?? undefined
+              );
+              if (patched.length > 0) {
+                if (patched.some(f => f.includes('backend') || f.endsWith('.py'))) needsBackendRestart = true;
+                if (patched.some(f => f.includes('frontend') || f.includes('sentry.client'))) needsFrontendRestart = true;
               }
-              await this.delay(500);
             }
 
-            onOutput('   ⏳ Waiting for new traces to settle...\n');
-            const freshTraces = await traceIngestService.waitForAllQuiet(2000);
-            repairedTraces = repairTraces(freshTraces, fixable, project);
+            // Restart servers once after all patches are applied
+            if (needsBackendRestart) {
+              onOutput('   🔄 Restarting backend...\n');
+              await this.restartBackend(appPath, project, onOutput, onError);
+            }
+            if (needsFrontendRestart && project.stack.type !== 'backend-only') {
+              onOutput('   🔄 Restarting frontend...\n');
+              await this.restartFrontend(appPath, project, onOutput, onError);
+            }
+
+            // Re-run targeted flows to capture the missing spans.
+            // Clear the trace buffer first so each attempt validates a fresh set
+            // of traces — otherwise error counts grow unboundedly as traces accumulate.
+            const flowsToRerun = getFlowsToRerun(nonFixable, userFlows);
+            if (flowsToRerun.length > 0) {
+              onOutput(`   🔁 Re-running ${flowsToRerun.length} flows: ${flowsToRerun.map(f => f.name).join(', ')}\n`);
+              traceIngestService.clear(); // ← fresh slate for this attempt
+              for (const flow of flowsToRerun) {
+                try {
+                  await this.executeFlow(flow, false, project, onOutput);
+                } catch (err) {
+                  onOutput(`   ⚠️ Re-run flow error: ${err}\n`);
+                }
+                await this.delay(500);
+              }
+
+              onOutput('   ⏳ Waiting for new traces to settle...\n');
+              const freshTraces = await traceIngestService.waitForAllQuiet(2000);
+              repairedTraces = repairTraces(freshTraces, fixable, project);
+            }
+          } else if (nonFixable.length > 0 && attempt === MAX_ATTEMPTS) {
+            onOutput(`   ⚠ ${nonFixable.length} issues unresolved after ${MAX_ATTEMPTS} attempts:\n`);
+            nonFixable.forEach(i => onOutput(`     • ${i.kind}: ${i.detail}\n`));
           }
-        } else if (nonFixable.length > 0 && attempt === MAX_ATTEMPTS) {
-          onOutput(`   ⚠ ${nonFixable.length} issues unresolved after ${MAX_ATTEMPTS} attempts:\n`);
-          nonFixable.forEach(i => onOutput(`     • ${i.kind}: ${i.detail}\n`));
+        }
+
+        // Step 9: Forward validated traces to real Sentry (only if project selected)
+        if (hasRealProject) {
+          onOutput('\n📤 Step 9: Forwarding validated traces to Sentry...\n');
+          const { repairTraces: rt, getRepairedSpanIds: grs } = await import('./trace-repairer');
+          const { forwardTracesToSentry } = await import('./trace-forwarder');
+          const { validateTraces: vt } = await import('./trace-validator');
+
+          const finalIssues = vt(repairedTraces, project, userFlows);
+          const finalFixable = finalIssues.filter(i => i.fixable);
+          const fullyRepaired = finalFixable.length > 0
+            ? rt(repairedTraces, finalFixable, project)
+            : repairedTraces;
+
+          const originalTraces = traceIngestService.getTraces();
+          const repairedIds = grs(originalTraces, fullyRepaired);
+          const allRawEnvelopes = traceIngestService.getAllRawEnvelopes();
+
+          const { forwarded, errors: fwdErrors } = await forwardTracesToSentry(
+            fullyRepaired,
+            allRawEnvelopes,
+            config.frontendDsn,
+            config.backendDsn,
+            repairedIds,
+            onOutput
+          );
+          onOutput(`   ✓ Forwarded ${forwarded} envelopes to Sentry\n`);
+          if (fwdErrors.length > 0) {
+            fwdErrors.forEach(e => onOutput(`   ⚠ ${e}\n`));
+          }
+        } else {
+          onOutput('\n⏭️  Step 9: Skipped — no Sentry project selected (traces validated locally only)\n');
         }
       }
 
-      // Step 9: Forward validated traces to real Sentry
-      onOutput('\n📤 Step 9: Forwarding validated traces to Sentry...\n');
-      const { repairTraces: rt, getRepairedSpanIds: grs } = await import('./trace-repairer');
-      const { forwardTracesToSentry } = await import('./trace-forwarder');
-      const { validateTraces: vt } = await import('./trace-validator');
-
-      const finalIssues = vt(repairedTraces, project, userFlows);
-      const finalFixable = finalIssues.filter(i => i.fixable);
-      const fullyRepaired = finalFixable.length > 0
-        ? rt(repairedTraces, finalFixable, project)
-        : repairedTraces;
-
-      const originalTraces = traceIngestService.getTraces();
-      const repairedIds = grs(originalTraces, fullyRepaired);
-      const allRawEnvelopes = traceIngestService.getAllRawEnvelopes();
-
-      const { forwarded, errors: fwdErrors } = await forwardTracesToSentry(
-        fullyRepaired,
-        allRawEnvelopes,
-        config.frontendDsn,
-        config.backendDsn,
-        repairedIds,
-        onOutput
-      );
-      onOutput(`   ✓ Forwarded ${forwarded} envelopes to Sentry\n`);
-      if (fwdErrors.length > 0) {
-        fwdErrors.forEach(e => onOutput(`   ⚠ ${e}\n`));
+      // Step 10: Verify coverage in Sentry (only meaningful if we forwarded)
+      if (hasRealProject) {
+        onOutput('\n🔍 Step 10: Verifying span coverage in Sentry...\n');
+        onOutput('   ⏳ Waiting 15s for Sentry ingestion...\n');
+        await this.delay(15000);
+        await this.verifyCoverage(project, onOutput);
       }
-
-      // Step 10: Verify coverage in Sentry
-      onOutput('\n🔍 Step 10: Verifying span coverage in Sentry...\n');
-      onOutput('   ⏳ Waiting 15s for Sentry ingestion...\n');
-      await this.delay(15000);
-      await this.verifyCoverage(project, onOutput);
 
       onOutput('\n✅ Live data generation complete!\n');
-      onOutput('   • Traces validated and repaired locally\n');
-      onOutput('   • Forwarded to Sentry with full fidelity\n');
-      onOutput('   • Dashboard should be ready to view\n');
+      onOutput('   • Traces captured and validated locally\n');
+      if (hasRealProject) {
+        onOutput('   • Validated traces forwarded to Sentry with full fidelity\n');
+        onOutput('   • Dashboard should be ready to view\n');
+      }
 
       return { success: true };
 
@@ -632,8 +686,19 @@ PORT=${this.BACKEND_PORT}
         await this.injectError(page, project);
       }
 
-      // Wait for Sentry to flush data
-      await this.delay(2000);
+      // Flush the browser Sentry SDK before closing the page so in-flight
+      // spans (pageload, navigation, custom) are not lost when the tab closes.
+      try {
+        await page.evaluate(async () => {
+          const win = window as any;
+          if (win.Sentry?.flush) {
+            await win.Sentry.flush(3000);
+          }
+        });
+      } catch {
+        // If flush fails (e.g. page already closing), fall back to a short wait
+        await this.delay(1000);
+      }
 
     } finally {
       await page.close();
@@ -863,7 +928,8 @@ PORT=${this.BACKEND_PORT}
   private async generateIntelligentFlows(
     project: EngagementSpec,
     appPath: string,
-    onOutput: (data: string) => void
+    onOutput: (data: string) => void,
+    coverageGapHint?: string
   ): Promise<UserFlow[]> {
     // Read actual backend routes code for code-grounded prompting
     const backendRoutesCode = this.readBackendRoutesCode(appPath, project);
@@ -877,13 +943,14 @@ PORT=${this.BACKEND_PORT}
     // Generate run ID for post-run verification
     const runId = `${project.id.substring(0, 8)}-${Date.now()}`;
 
-    // Delegate to LLM service
+    // Delegate to LLM service (pass coverage gap hint for re-reason cycles)
     let flows = await this.llmService!.generateUserFlows(
       project,
       backendRoutesCode,
       frontendPages,
       widgetFilters,
-      runId
+      runId,
+      coverageGapHint
     );
 
     // Run 4-agent validation pipeline in parallel

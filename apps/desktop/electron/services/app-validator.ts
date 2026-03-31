@@ -2,6 +2,13 @@ import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
 import { EngagementSpec } from '../../src/types/spec';
+import type { LLMService } from './llm';
+import { ValidationLogger } from './validation-logger';
+import type { RouteContract } from './route-contract';
+import { extractFrontendFetchUrls, runIntegrationHealthCheck, repairRouteMismatch } from './integration-health-check';
+import { buildRepairPreamble } from './sdk-version-guard';
+import { buildRepairContext, TSError } from './repair-context-builder';
+import type { FetchCall, HealthCheckResult } from './integration-health-check';
 
 export interface AppValidationResult {
   success: boolean;
@@ -36,7 +43,9 @@ export async function validateGeneratedApp(
   project: EngagementSpec,
   llmConfig: LLMConfig,
   onProgress: OnProgress,
-  onOutput: OnOutput
+  onOutput: OnOutput,
+  llmService?: LLMService,
+  routeContract?: RouteContract
 ): Promise<AppValidationResult> {
   const warnings: string[] = [];
   const errors: string[] = [];
@@ -47,175 +56,436 @@ export async function validateGeneratedApp(
   const frontendPath = path.join(appPath, 'frontend');
   const backendPath = isPython ? appPath : path.join(appPath, 'backend');
 
-  // ── Layer 1: Static structure check (~2s, no server) ─────────────────────
+  const logger = new ValidationLogger(onOutput);
+
+  // ── Layer 1: Static structure check ──────────────────────────────────────
   onProgress(86, 'Checking app structure…');
-  onOutput('🔍 Layer 1: Static structure check\n');
-
-  const structureIssues = checkStructure(appPath, frontendPath, project, isBackendOnly);
-  for (const issue of structureIssues) {
-    if (issue.fatal) {
-      errors.push(issue.message);
-      onOutput(`   ✗ ${issue.message}\n`);
-    } else {
-      warnings.push(issue.message);
-      onOutput(`   ⚠ ${issue.message}\n`);
+  logger.startStep('Layer 1', 'Static structure check');
+  try {
+    const structureIssues = checkStructure(appPath, frontendPath, project, isBackendOnly);
+    for (const issue of structureIssues) {
+      if (issue.fatal) {
+        errors.push(issue.message);
+        onOutput(`   ✗ ${issue.message}\n`);
+      } else {
+        warnings.push(issue.message);
+        onOutput(`   ⚠ ${issue.message}\n`);
+      }
     }
-  }
-  if (structureIssues.filter(i => i.fatal).length === 0) {
-    onOutput('   ✓ Structure looks good\n');
+    const fatalCount = structureIssues.filter(i => i.fatal).length;
+    if (fatalCount > 0) {
+      logger.completeStep('failed', `${fatalCount} fatal structure issue(s)`);
+    } else if (structureIssues.length > 0) {
+      logger.completeStep('warned', `${structureIssues.length} non-fatal issue(s) found`);
+    } else {
+      logger.completeStep('passed', 'All required files present');
+    }
+  } catch (err: any) {
+    logger.failStep(err);
+    errors.push(`Structure check threw: ${err.message}`);
   }
 
-  // ── Layer 2: Install dependencies ────────────────────────────────────────
+  // ── Layer 2a: Install dependencies ───────────────────────────────────────
   onProgress(87, 'Installing dependencies…');
-  onOutput('\n📦 Layer 2a: Installing dependencies\n');
+  logger.startStep('Layer 2a', 'Install dependencies');
+  try {
+    let installFailed = false;
+    let packagesInstalled = 0;
 
-  if (!isBackendOnly && fs.existsSync(frontendPath)) {
-    onOutput('   Installing frontend dependencies…\n');
-    const { exitCode: feInstall } = await runCommand('npm', ['install', '--prefer-offline'], frontendPath, onOutput);
-    if (feInstall !== 0) {
-      // ENOTEMPTY or other corruption — wipe node_modules and retry without --prefer-offline
-      onOutput('   ⚠ Frontend npm install failed — cleaning node_modules and retrying…\n');
-      const nmPath = path.join(frontendPath, 'node_modules');
-      if (fs.existsSync(nmPath)) {
-        try { fs.rmSync(nmPath, { recursive: true, force: true }); } catch {}
+    if (!isBackendOnly && fs.existsSync(frontendPath)) {
+      onOutput('   Installing frontend dependencies…\n');
+      const { exitCode: feInstall } = await runCommand('npm', ['install', '--prefer-offline'], frontendPath, onOutput);
+      if (feInstall !== 0) {
+        // ENOTEMPTY or other corruption — wipe node_modules and retry without --prefer-offline
+        onOutput('   ⚠ Frontend npm install failed — cleaning node_modules and retrying…\n');
+        const nmPath = path.join(frontendPath, 'node_modules');
+        if (fs.existsSync(nmPath)) {
+          try { fs.rmSync(nmPath, { recursive: true, force: true }); } catch {}
+        }
+        const { exitCode: feRetry } = await runCommand('npm', ['install'], frontendPath, onOutput);
+        if (feRetry !== 0) {
+          onOutput('   ⚠ Frontend npm install failed after retry — build check may fail\n');
+          installFailed = true;
+        }
       }
-      const { exitCode: feRetry } = await runCommand('npm', ['install'], frontendPath, onOutput);
-      if (feRetry !== 0) {
-        onOutput('   ⚠ Frontend npm install failed after retry — build check may fail\n');
-      } else {
-        onOutput('   ✓ Frontend dependencies installed\n');
+      const feNm = path.join(frontendPath, 'node_modules');
+      if (fs.existsSync(feNm)) {
+        try { packagesInstalled += fs.readdirSync(feNm).length; } catch {}
       }
-    } else {
-      onOutput('   ✓ Frontend dependencies installed\n');
     }
+
+    if (!isPython && fs.existsSync(backendPath)) {
+      onOutput('   Installing backend dependencies…\n');
+      const { exitCode: beInstall } = await runCommand('npm', ['install', '--prefer-offline'], backendPath, onOutput);
+      if (beInstall !== 0) {
+        onOutput('   ⚠ Backend npm install failed — cleaning node_modules and retrying…\n');
+        const nmPath = path.join(backendPath, 'node_modules');
+        if (fs.existsSync(nmPath)) {
+          try { fs.rmSync(nmPath, { recursive: true, force: true }); } catch {}
+        }
+        const { exitCode: beRetry } = await runCommand('npm', ['install'], backendPath, onOutput);
+        if (beRetry !== 0) {
+          onOutput('   ⚠ Backend npm install failed after retry — build check may fail\n');
+          installFailed = true;
+        }
+      }
+      const beNm = path.join(backendPath, 'node_modules');
+      if (fs.existsSync(beNm)) {
+        try { packagesInstalled += fs.readdirSync(beNm).length; } catch {}
+      }
+    }
+
+    if (installFailed) {
+      logger.completeStep('warned', 'Install had failures — build may fail');
+    } else {
+      logger.completeStep('passed', `~${packagesInstalled} packages installed`);
+    }
+  } catch (err: any) {
+    logger.failStep(err);
   }
 
-  if (!isPython && fs.existsSync(backendPath)) {
-    onOutput('   Installing backend dependencies…\n');
-    const { exitCode: beInstall } = await runCommand('npm', ['install', '--prefer-offline'], backendPath, onOutput);
-    if (beInstall !== 0) {
-      onOutput('   ⚠ Backend npm install failed — cleaning node_modules and retrying…\n');
-      const nmPath = path.join(backendPath, 'node_modules');
-      if (fs.existsSync(nmPath)) {
-        try { fs.rmSync(nmPath, { recursive: true, force: true }); } catch {}
-      }
-      const { exitCode: beRetry } = await runCommand('npm', ['install'], backendPath, onOutput);
-      if (beRetry !== 0) {
-        onOutput('   ⚠ Backend npm install failed after retry — build check may fail\n');
-      } else {
-        onOutput('   ✓ Backend dependencies installed\n');
-      }
-    } else {
-      onOutput('   ✓ Backend dependencies installed\n');
-    }
-  }
-
-  // ── Layer 2: Build check + LLM repair loop ────────────────────────────────
+  // ── Layer 2b: Build check + LLM repair loop ───────────────────────────────
   onProgress(88, 'Building frontend…');
-  onOutput('\n🔨 Layer 2b: Build check\n');
+  logger.startStep('Layer 2b', 'Build check');
+  try {
+    const MAX_BUILD_ATTEMPTS = 3;
+    let buildRepairs = 0;
+    let buildAllPassed = true;
 
-  const MAX_BUILD_ATTEMPTS = 3;
+    if (!isBackendOnly) {
+      // Frontend: next build
+      let feBuildPassed = false;
+      let fePrevErrorSig = '';
+      for (let attempt = 1; attempt <= MAX_BUILD_ATTEMPTS; attempt++) {
+        onOutput(`\n   Frontend build (attempt ${attempt}/${MAX_BUILD_ATTEMPTS})…\n`);
+        // Force NODE_ENV=production so Next.js and React initialize their SSR context
+        // correctly. Electron's process may have a non-standard NODE_ENV which causes
+        // useContext to return null during static page generation.
+        const { exitCode, output } = await runCommand('npm', ['run', 'build'], frontendPath, onOutput, { NODE_ENV: 'production' });
 
-  if (!isBackendOnly) {
-    // Frontend: next build
-    let feBuildPassed = false;
-    for (let attempt = 1; attempt <= MAX_BUILD_ATTEMPTS; attempt++) {
-      onOutput(`\n   Frontend build (attempt ${attempt}/${MAX_BUILD_ATTEMPTS})…\n`);
-      // Force NODE_ENV=production so Next.js and React initialize their SSR context
-      // correctly. Electron's process may have a non-standard NODE_ENV which causes
-      // useContext to return null during static page generation.
-      const { exitCode, output } = await runCommand('npm', ['run', 'build'], frontendPath, onOutput, { NODE_ENV: 'production' });
+        if (exitCode === 0) {
+          onOutput('   ✓ Frontend build passed\n');
+          feBuildPassed = true;
+          break;
+        }
 
-      if (exitCode === 0) {
-        onOutput('   ✓ Frontend build passed\n');
-        feBuildPassed = true;
-        break;
+        const buildErrors = parseBuildErrors(output, frontendPath);
+        if (buildErrors.length === 0 || attempt === MAX_BUILD_ATTEMPTS) {
+          errors.push(`Frontend build failed after ${attempt} attempt(s)`);
+          buildAllPassed = false;
+          break;
+        }
+
+        // Fix 3: Convergence check — stop if same errors persist after repair
+        const errSig = buildErrors.map(e => `${path.basename(e.file)}:${e.message}`).sort().join('|');
+        if (attempt > 1 && errSig === fePrevErrorSig) {
+          onOutput(`   ✗ Repair not converging — same ${buildErrors.length} error(s) after attempt ${attempt - 1}. Stopping.\n`);
+          errors.push(`Frontend build failed: repair loop stalled after ${attempt - 1} attempt(s)`);
+          buildAllPassed = false;
+          break;
+        }
+        fePrevErrorSig = errSig;
+
+        onOutput(`   Found ${buildErrors.length} error(s) in ${new Set(buildErrors.map(e => e.file)).size} file(s) — attempting LLM repair…\n`);
+        const repaired = await repairBuildErrors(buildErrors, llmConfig, onOutput, llmService, frontendPath);
+        if (repaired > 0) {
+          buildRepaired = true;
+          buildRepairs += repaired;
+          onOutput(`   🔧 Repaired ${repaired} file(s)\n`);
+        }
       }
-
-      const buildErrors = parseBuildErrors(output, frontendPath);
-      if (buildErrors.length === 0 || attempt === MAX_BUILD_ATTEMPTS) {
-        errors.push(`Frontend build failed after ${attempt} attempt(s)`);
-        break;
-      }
-
-      onOutput(`   Found ${buildErrors.length} error(s) in ${new Set(buildErrors.map(e => e.file)).size} file(s) — attempting LLM repair…\n`);
-      const repaired = await repairBuildErrors(buildErrors, llmConfig, onOutput);
-      if (repaired > 0) {
-        buildRepaired = true;
-        onOutput(`   🔧 Repaired ${repaired} file(s)\n`);
+      if (!feBuildPassed && buildAllPassed) {
+        buildAllPassed = false;
+        onOutput('   ✗ Frontend build could not be fixed automatically\n');
       }
     }
-    if (!feBuildPassed) {
-      onOutput('   ✗ Frontend build could not be fixed automatically\n');
+
+    // Backend: tsc --noEmit (TypeScript only; Python gets a syntax check)
+    onProgress(93, 'Building backend…');
+    if (!isPython) {
+      let beBuildPassed = false;
+      let bePrevErrorSig = '';
+      for (let attempt = 1; attempt <= MAX_BUILD_ATTEMPTS; attempt++) {
+        onOutput(`\n   Backend type-check (attempt ${attempt}/${MAX_BUILD_ATTEMPTS})…\n`);
+        const { exitCode, output } = await runCommand('npx', ['tsc', '--noEmit'], backendPath, onOutput);
+
+        if (exitCode === 0) {
+          onOutput('   ✓ Backend type-check passed\n');
+          beBuildPassed = true;
+          break;
+        }
+
+        const buildErrors = parseBuildErrors(output, backendPath);
+        if (buildErrors.length === 0 || attempt === MAX_BUILD_ATTEMPTS) {
+          errors.push(`Backend type-check failed after ${attempt} attempt(s)`);
+          buildAllPassed = false;
+          break;
+        }
+
+        // Fix 3: Convergence check — stop if same errors persist after repair
+        const errSig = buildErrors.map(e => `${path.basename(e.file)}:${e.message}`).sort().join('|');
+        if (attempt > 1 && errSig === bePrevErrorSig) {
+          onOutput(`   ✗ Repair not converging — same ${buildErrors.length} error(s) after attempt ${attempt - 1}. Stopping.\n`);
+          errors.push(`Backend type-check failed: repair loop stalled after ${attempt - 1} attempt(s)`);
+          buildAllPassed = false;
+          break;
+        }
+        bePrevErrorSig = errSig;
+
+        onOutput(`   Found ${buildErrors.length} error(s) — attempting LLM repair…\n`);
+        const repaired = await repairBuildErrors(buildErrors, llmConfig, onOutput, llmService, backendPath);
+        if (repaired > 0) {
+          buildRepaired = true;
+          buildRepairs += repaired;
+          onOutput(`   🔧 Repaired ${repaired} file(s)\n`);
+        }
+      }
+      if (!beBuildPassed && buildAllPassed) {
+        buildAllPassed = false;
+        onOutput('   ✗ Backend build could not be fixed automatically\n');
+      }
+    } else {
+      // Python syntax check — fast, no dependencies needed
+      onOutput('\n   Python syntax check…\n');
+      const pyFiles = findPythonEntryFile(backendPath);
+      const pyEntry = pyFiles[0];
+
+      if (pyEntry) {
+        const pyEntryName = path.basename(pyEntry);
+        const { exitCode, output } = await runCommand('python3', ['-m', 'py_compile', pyEntryName], backendPath, onOutput);
+        if (exitCode === 0) {
+          onOutput('   ✓ Python syntax OK\n');
+          onOutput('   Running pylint check…\n');
+          const pylintResult = await runPylintCheck(backendPath, pyEntryName, onOutput);
+          if (pylintResult.errors.length > 0) {
+            onOutput(`   Found ${pylintResult.errors.length} pylint error(s) — attempting repair…\n`);
+            const pyRepaired = await repairPythonErrors(pyEntry, pylintResult.errors, project, llmConfig, onOutput, llmService);
+            if (pyRepaired) {
+              buildRepaired = true;
+              buildRepairs++;
+              onOutput('   ✓ Python errors repaired\n');
+            }
+          } else {
+            onOutput('   ✓ Pylint check passed\n');
+          }
+        } else {
+          errors.push(`Python syntax error in ${pyEntryName}`);
+          buildAllPassed = false;
+          onOutput(`   ✗ ${output.trim()}\n`);
+        }
+      }
     }
+
+    if (!buildAllPassed) {
+      logger.completeStep('failed', 'Build failed — could not auto-repair');
+    } else if (buildRepairs > 0) {
+      logger.completeStep('warned', `Build passed after ${buildRepairs} repair(s)`);
+    } else {
+      logger.completeStep('passed', 'Build passed clean');
+    }
+  } catch (err: any) {
+    logger.failStep(err);
+    errors.push(`Build check threw: ${err.message}`);
   }
 
-  // Backend: tsc --noEmit (TypeScript only; Python gets a syntax check)
-  onProgress(93, 'Building backend…');
-  if (!isPython) {
-    let beBuildPassed = false;
-    for (let attempt = 1; attempt <= MAX_BUILD_ATTEMPTS; attempt++) {
-      onOutput(`\n   Backend type-check (attempt ${attempt}/${MAX_BUILD_ATTEMPTS})…\n`);
-      const { exitCode, output } = await runCommand(
-        'npx', ['tsc', '--noEmit'], backendPath, onOutput
-      );
+  // ── Layers 2c / 2e / 2f: Integration health check ────────────────────────
+  // Only runs when a routeContract was derived (non-mobile, non-backend-only stacks)
+  if (routeContract && !isBackendOnly) {
+    let fetchCalls: FetchCall[] = [];
 
-      if (exitCode === 0) {
-        onOutput('   ✓ Backend type-check passed\n');
-        beBuildPassed = true;
-        break;
-      }
+    // Layer 2c: Extract fetch() URLs from generated page files
+    logger.startStep('Layer 2c', 'Extract frontend fetch() URLs');
+    try {
+      const appDir = fs.existsSync(path.join(frontendPath, 'app'))
+        ? path.join(frontendPath, 'app')
+        : path.join(frontendPath, 'src', 'app');
+      const pageFiles: string[] = [];
+      const walkDir = (dir: string) => {
+        if (!fs.existsSync(dir)) return;
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) walkDir(full);
+          else if (/\.(tsx|ts|jsx|js)$/.test(entry.name) && /^page\.|^route\./.test(entry.name)) pageFiles.push(full);
+        }
+      };
+      walkDir(appDir);
 
-      const buildErrors = parseBuildErrors(output, backendPath);
-      if (buildErrors.length === 0 || attempt === MAX_BUILD_ATTEMPTS) {
-        errors.push(`Backend type-check failed after ${attempt} attempt(s)`);
-        break;
-      }
+      fetchCalls = extractFrontendFetchUrls(pageFiles);
 
-      onOutput(`   Found ${buildErrors.length} error(s) — attempting LLM repair…\n`);
-      const repaired = await repairBuildErrors(buildErrors, llmConfig, onOutput);
-      if (repaired > 0) {
-        buildRepaired = true;
-        onOutput(`   🔧 Repaired ${repaired} file(s)\n`);
-      }
-    }
-    if (!beBuildPassed) {
-      onOutput('   ✗ Backend build could not be fixed automatically\n');
-    }
-  } else {
-    // Python syntax check — fast, no dependencies needed
-    onOutput('\n   Python syntax check…\n');
-    const pyEntry = ['main.py', 'app.py'].find(f => fs.existsSync(path.join(backendPath, f)));
-    if (pyEntry) {
-      const { exitCode, output } = await runCommand(
-        'python3', ['-m', 'py_compile', pyEntry], backendPath, onOutput
-      );
-      if (exitCode === 0) {
-        onOutput('   ✓ Python syntax OK\n');
+      if (fetchCalls.length === 0) {
+        logger.completeStep('skipped', 'No fetch() calls found in page files');
       } else {
-        errors.push(`Python syntax error in ${pyEntry}`);
-        onOutput(`   ✗ ${output.trim()}\n`);
+        for (const c of fetchCalls) {
+          onOutput(`   ${c.method} ${new URL(c.url).pathname}  (${path.basename(c.pageFile)})\n`);
+        }
+        logger.completeStep('passed', `Found ${fetchCalls.length} fetch() call(s)`);
+      }
+    } catch (err: any) {
+      logger.failStep(err);
+      fetchCalls = [];
+    }
+
+    if (fetchCalls.length > 0) {
+      // Layer 2e: Integration health check — fire real HTTP requests
+      onProgress(95, 'Integration health check…');
+      logger.startStep('Layer 2e', `Health check (${fetchCalls.length} endpoints)`);
+      let healthResult: HealthCheckResult | null = null;
+      try {
+        healthResult = await runIntegrationHealthCheck(
+          fetchCalls,
+          backendPath,
+          isPython,
+          routeContract,
+          onOutput
+        );
+
+        const failCount = healthResult.checks.filter(c => !c.passed).length;
+        if (healthResult.passed) {
+          logger.completeStep('passed', `All ${healthResult.checks.length} routes verified`);
+        } else {
+          logger.completeStep('warned', `${failCount}/${healthResult.checks.length} routes failed — repair needed`);
+        }
+      } catch (err: any) {
+        logger.failStep(err);
+        healthResult = null;
+      }
+
+      // Layer 2f: Repair + re-verify loop
+      if (healthResult && !healthResult.passed) {
+        const MAX_REPAIR_ROUNDS = 3;
+        const backendRoutesPath = path.join(backendPath, 'src', 'routes', 'api.ts');
+        const appDir = fs.existsSync(path.join(frontendPath, 'app'))
+          ? path.join(frontendPath, 'app')
+          : path.join(frontendPath, 'src', 'app');
+
+        logger.startStep('Layer 2f', `Route repair (up to ${MAX_REPAIR_ROUNDS} rounds)`);
+        try {
+          let currentResult = healthResult;
+          let totalRepairedFiles = 0;
+          let prevFailureSig = '';
+
+          for (let round = 1; round <= MAX_REPAIR_ROUNDS; round++) {
+            if (currentResult.passed) break;
+
+            // Convergence check: stop if the same URLs are failing again after repair
+            const failureSig = currentResult.checks
+              .filter(c => !c.passed)
+              .map(c => `${c.method}:${c.url}`)
+              .sort()
+              .join('|');
+            if (round > 1 && failureSig === prevFailureSig) {
+              onOutput(`   ✗ Route repair not converging — same ${currentResult.checks.filter(c => !c.passed).length} failure(s) after round ${round - 1}. Stopping.\n`);
+              break;
+            }
+            prevFailureSig = failureSig;
+
+            const failures = currentResult.checks
+              .filter(c => !c.passed)
+              .map(c => ({
+                url: c.url,
+                method: c.method,
+                pageFile: c.pageFile,
+                spanHint: c.spanHint,
+                status: c.status,
+                failure: c.failure,
+              }));
+
+            onOutput(`\n   Round ${round}/${MAX_REPAIR_ROUNDS}: repairing ${failures.length} failure(s)…\n`);
+
+            const repairResult = await repairRouteMismatch(
+              failures,
+              backendRoutesPath,
+              appDir,
+              routeContract,
+              llmService,
+              llmConfig,
+              onOutput
+            );
+
+            if (repairResult.anyChangesApplied) {
+              buildRepaired = true;
+              totalRepairedFiles += repairResult.repairedFiles.length;
+              onOutput(`   ✓ Round ${round}: changed ${repairResult.repairedFiles.map(f => path.basename(f)).join(', ')}\n`);
+
+              // Re-extract fetch URLs from the now-modified source files before re-verifying.
+              // The old fetchCalls may contain URLs that were just removed from the page —
+              // if we reuse the stale list, the health check would keep testing URLs that
+              // no longer exist in the source, looping forever.
+              const pageFilesAfterRepair: string[] = [];
+              const walkForRefresh = (dir: string) => {
+                if (!fs.existsSync(dir)) return;
+                for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                  const full = path.join(dir, entry.name);
+                  if (entry.isDirectory()) walkForRefresh(full);
+                  else if (/\.(tsx|ts|jsx|js)$/.test(entry.name) && /^page\.|^route\./.test(entry.name)) pageFilesAfterRepair.push(full);
+                }
+              };
+              walkForRefresh(appDir);
+              const freshFetchCalls = extractFrontendFetchUrls(pageFilesAfterRepair);
+              onOutput(`   ${freshFetchCalls.length} fetch() call(s) in source after repair\n`);
+
+              if (freshFetchCalls.length === 0) {
+                // All fetch calls were removed — nothing left to fail
+                currentResult = { passed: true, checks: [] };
+                break;
+              }
+
+              // Re-verify after repair
+              onOutput('   Re-running health check…\n');
+              currentResult = await runIntegrationHealthCheck(
+                freshFetchCalls,
+                backendPath,
+                isPython,
+                routeContract,
+                onOutput
+              );
+            } else {
+              // No changes applied — further rounds won't help
+              onOutput(`   ⚠ Round ${round}: no changes applied — stopping\n`);
+              for (const sf of repairResult.skippedFailures) {
+                onOutput(`     – ${sf.url}: ${sf.reason}\n`);
+              }
+              break;
+            }
+          }
+
+          const remainingFails = currentResult.checks.filter(c => !c.passed).length;
+          if (currentResult.passed) {
+            logger.completeStep('passed', `All routes healthy after ${totalRepairedFiles} file repair(s)`);
+          } else {
+            logger.completeStep('warned', `${remainingFails} route(s) still failing after ${MAX_REPAIR_ROUNDS} round(s)`);
+            warnings.push(`${remainingFails} integration health check failure(s) remain after repair`);
+          }
+        } catch (err: any) {
+          logger.failStep(err);
+          warnings.push(`Route repair threw: ${err.message}`);
+        }
       }
     }
   }
 
   // ── Layer 3: Smoke test — quick backend start ─────────────────────────────
   onProgress(96, 'Running smoke test…');
-  onOutput('\n🚀 Layer 3: Smoke test\n');
-
-  const smokeResult = await smokeTestBackend(backendPath, isPython, onOutput);
-  if (!smokeResult.started) {
-    warnings.push('Backend failed to start during smoke test — check server initialization');
-    onOutput(`   ⚠ Backend did not start cleanly: ${smokeResult.error}\n`);
-  } else {
-    onOutput('   ✓ Backend started successfully\n');
+  logger.startStep('Layer 3', 'Backend smoke test');
+  try {
+    const smokeResult = await smokeTestBackend(backendPath, isPython, onOutput);
+    if (!smokeResult.started) {
+      warnings.push('Backend failed to start during smoke test — check server initialization');
+      onOutput(`   ⚠ Backend did not start cleanly: ${smokeResult.error}\n`);
+      logger.completeStep('warned', `Did not start: ${smokeResult.error?.slice(0, 60) ?? 'unknown error'}`);
+    } else {
+      logger.completeStep('passed', 'Backend started successfully');
+    }
+  } catch (err: any) {
+    logger.failStep(err);
+    warnings.push(`Smoke test threw: ${err.message}`);
   }
 
   onProgress(98, 'Validation complete');
-  onOutput(`\n${errors.length === 0 ? '✅' : '⚠'} Validation complete — ${errors.length} error(s), ${warnings.length} warning(s)\n`);
+  const summary = logger.printSummary();
 
   return {
-    success: errors.length === 0,
+    success: summary.passed,
     warnings,
     errors,
     buildRepaired,
@@ -398,7 +668,24 @@ function parseBuildErrors(output: string, basePath: string): BuildError[] {
  * Applied before LLM repair to avoid wasting tokens on predictable issues.
  * Returns the set of absolute file paths that were successfully patched.
  */
-function deterministicRepair(errors: BuildError[], onOutput: OnOutput): Set<string> {
+// Known Next.js / React symbols → import line (Fix 2)
+const KNOWN_IMPORT_MAP: Record<string, string> = {
+  'Link':            "import Link from 'next/link'",
+  'Image':           "import Image from 'next/image'",
+  'useRouter':       "import { useRouter } from 'next/navigation'",
+  'usePathname':     "import { usePathname } from 'next/navigation'",
+  'useSearchParams': "import { useSearchParams } from 'next/navigation'",
+  'useState':        "import { useState } from 'react'",
+  'useEffect':       "import { useEffect } from 'react'",
+  'useCallback':     "import { useCallback } from 'react'",
+  'useRef':          "import { useRef } from 'react'",
+  'useMemo':         "import { useMemo } from 'react'",
+  'useContext':      "import { useContext } from 'react'",
+  'Suspense':        "import { Suspense } from 'react'",
+  'Metadata':        "import type { Metadata } from 'next'",
+};
+
+function deterministicRepair(errors: BuildError[], onOutput: OnOutput, projectDir?: string): Set<string> {
   const byFile = new Map<string, BuildError[]>();
   for (const e of errors) {
     const existing = byFile.get(e.file) ?? [];
@@ -414,15 +701,13 @@ function deterministicRepair(errors: BuildError[], onOutput: OnOutput): Set<stri
 
     for (const e of fileErrors) {
       // TS2451: Cannot redeclare block-scoped variable — file is being treated as a script.
-      // Fix: ensure the file is a module by adding `export {}` if it has no exports already.
       if (e.message.includes('Cannot redeclare block-scoped variable')) {
         if (!/\bexport\b/.test(updated)) {
           updated = updated + '\nexport {};\n';
         }
       }
 
-      // SWC "Expected ',', got ';'" — LLM emitted `}, { ... };` instead of `}, { ... });`
-      // i.e. forgot the closing `)` before `;` on a trace_* call with an object arg.
+      // SWC syntax error — forgot closing `)` on trace_* call
       if (e.message.includes("Expected ','") || e.message.includes("Syntax error")) {
         updated = updated.replace(
           /(},\s*\{(?:[^{}]|\{[^}]*\})*\})\s*;/g,
@@ -430,13 +715,62 @@ function deterministicRepair(errors: BuildError[], onOutput: OnOutput): Set<stri
         );
       }
 
-      // TS18046: 'err' is of type 'unknown' — catch clause err access.
-      // Fix: cast to Error before accessing .message / .stack
+      // TS18046: 'err' is of type 'unknown' — cast catch variable
       if (e.message.includes("is of type 'unknown'")) {
         updated = updated
           .replace(/\bcatch\s*\(\s*(\w+)\s*\)/g, 'catch ($1: unknown)')
           .replace(/\b(\w+)\.message\b/g, '($1 as Error).message')
           .replace(/\b(\w+)\.stack\b/g, '($1 as Error).stack');
+      }
+
+      // Fix 2A: TS2304 Cannot find name 'trace_*' — normalise against instrumentation exports
+      const traceMissingMatch = e.message.match(/Cannot find name '(trace_\w+)'/);
+      if (traceMissingMatch && projectDir) {
+        const { normaliseTraceFunctionNames } = require('./instrumentation-injector');
+        const instrCandidates = [
+          path.join(projectDir, 'src', 'instrumentation.ts'),
+          path.join(projectDir, 'lib', 'instrumentation.ts'),
+          path.join(projectDir, 'instrumentation.ts'),
+        ];
+        const instrFile = instrCandidates.find(p => fs.existsSync(p));
+        if (instrFile) {
+          const renames = normaliseTraceFunctionNames(file, instrFile);
+          if (renames.length > 0) {
+            // Re-read after normalisation (file was written by normaliseTraceFunctionNames)
+            try { updated = fs.readFileSync(file, 'utf8'); } catch {}
+            onOutput(`   ✓ Normalised ${renames.length} trace function name(s) in ${path.basename(file)}\n`);
+          }
+        }
+      }
+
+      // Fix 2B: TS2304 Cannot find name 'Link'/'useRouter'/etc. — add missing import
+      const symbolMissingMatch = e.message.match(/Cannot find name '(\w+)'/);
+      if (symbolMissingMatch && !e.message.includes('trace_')) {
+        const sym = symbolMissingMatch[1];
+        const importLine = KNOWN_IMPORT_MAP[sym];
+        if (importLine && !updated.includes(importLine)) {
+          // Insert after 'use client' if present, otherwise at the top
+          if (updated.startsWith("'use client'")) {
+            updated = updated.replace("'use client'\n", `'use client'\n${importLine}\n`);
+          } else if (updated.startsWith('"use client"')) {
+            updated = updated.replace('"use client"\n', `"use client"\n${importLine}\n`);
+          } else {
+            updated = `${importLine}\n${updated}`;
+          }
+          onOutput(`   ✓ Added missing import: ${importLine}\n`);
+        }
+      }
+
+      // Fix 2C: TS6133 'X' declared but never read — prefix with _ to suppress
+      const unusedMatch = e.message.match(/'(\w+)' is declared but its value is never read/);
+      if (unusedMatch) {
+        const varName = unusedMatch[1];
+        if (!varName.startsWith('_')) {
+          updated = updated.replace(
+            new RegExp(`\\b(const|let|var)\\s+${varName}\\b`),
+            `$1 _${varName}`
+          );
+        }
       }
     }
 
@@ -454,10 +788,12 @@ function deterministicRepair(errors: BuildError[], onOutput: OnOutput): Set<stri
 async function repairBuildErrors(
   errors: BuildError[],
   llmConfig: LLMConfig,
-  onOutput: OnOutput
+  onOutput: OnOutput,
+  llmService?: LLMService,
+  projectDir?: string
 ): Promise<number> {
   // Step 1: Apply deterministic fixes for known patterns (no LLM needed)
-  const detPatched = deterministicRepair(errors, onOutput);
+  const detPatched = deterministicRepair(errors, onOutput, projectDir);
   let repairedCount = detPatched.size;
 
   // Step 2: LLM repair for remaining errors — group by file, skip already-patched files
@@ -489,8 +825,35 @@ NEXT.JS 14 APP ROUTER RULES (this is the root cause — apply all of these):
 - NEVER import Html, Head, Main, or NextScript from 'next/document' in a page component.
 - Pages with NO hooks and NO browser APIs can omit 'use client' (they are Server Components).` : '';
 
-    const prompt = `Fix the following TypeScript/JavaScript build errors in this file.
-Return ONLY the complete corrected file contents — no explanation, no markdown fences.${nextjsRules}
+    // Collect original imports before LLM repair so we can restore any dropped ones
+    const originalImports = extractImportLines(code);
+
+    const sdkPreamble = buildRepairPreamble(projectDir);
+
+    // Build cross-file context (Fix 1 / Fix B): TS error codes → instrumentation exports,
+    // SDK version notes, missing import hints, etc.
+    const tsErrors: TSError[] = fileErrors.map(e => {
+      const codeMatch = e.raw?.match(/error\s+(TS\d+):/);
+      return {
+        code: codeMatch ? codeMatch[1] : 'TS0000',
+        message: e.message,
+        line: e.line,
+        file: e.file,
+      };
+    });
+    const crossFileContext = projectDir
+      ? buildRepairContext(tsErrors, file, projectDir)
+      : '';
+    const contextSection = crossFileContext
+      ? `\nCROSS-FILE CONTEXT (ground truth — do not deviate from this):\n${crossFileContext}\n`
+      : '';
+
+    const prompt = `${sdkPreamble}${contextSection}Fix the following TypeScript/JavaScript build errors in this file.
+Return ONLY the complete corrected file contents — no explanation, no markdown fences.
+
+CRITICAL: Preserve EVERY import statement that exists in the original file.
+Do NOT remove any import, even if you think it is unused — the build will fail without it.
+Only ADD imports if they are needed to fix the errors below.${nextjsRules}
 
 ERRORS:
 ${errorSummary}
@@ -499,8 +862,16 @@ FILE (${path.basename(file)}):
 ${code}`;
 
     try {
-      const fixed = await callLlm(prompt, llmConfig);
+      let fixed = llmService
+        ? await llmService.callLLMDirect([{ role: 'user', content: prompt }], {
+            baseUrl: llmConfig.baseUrl,
+            apiKey: llmConfig.apiKey,
+            model: llmConfig.model ?? 'gpt-4-turbo-preview',
+          } as any).then((raw: string) => raw.replace(/^```(?:typescript|tsx|javascript|js|python)?\n?/, '').replace(/\n?```[\s\S]*$/, '').trim())
+        : await callLlm(prompt, llmConfig);
       if (fixed && fixed.trim() !== code.trim()) {
+        // Deterministic post-repair: restore any imports the LLM silently dropped
+        fixed = restoreDroppedImports(fixed, originalImports);
         fs.writeFileSync(file, fixed, 'utf8');
         repairedCount++;
         onOutput(`   ✓ Fixed ${path.basename(file)}\n`);
@@ -511,6 +882,176 @@ ${code}`;
   }
 
   return repairedCount;
+}
+
+// ── Import preservation helpers ───────────────────────────────────────────────
+
+/**
+ * Extract every `import` statement from a TypeScript/JavaScript source string.
+ * Returns each import as a trimmed string (may span multiple lines joined to one).
+ */
+function extractImportLines(code: string): string[] {
+  const imports: string[] = [];
+  // Match single-line and simple multi-line imports
+  const importRe = /^import\s+[^;]+;/gm;
+  let m: RegExpExecArray | null;
+  while ((m = importRe.exec(code)) !== null) {
+    imports.push(m[0].trim());
+  }
+  return imports;
+}
+
+/**
+ * Compare `originalImports` against what appears in `repairedCode`.
+ * Re-insert any import that was present in the original but is missing from the repair.
+ * Inserts missing imports after the last existing import block to preserve grouping.
+ */
+function restoreDroppedImports(repairedCode: string, originalImports: string[]): string {
+  const missing = originalImports.filter(imp => {
+    // Check by the imported symbol(s) / module path — not byte-exact match,
+    // because the LLM may reformat spacing.
+    // Extract the module path from the import (last quoted string).
+    const moduleMatch = /from\s+['"]([^'"]+)['"]/g.exec(imp) ?? /import\s+['"]([^'"]+)['"]/g.exec(imp);
+    if (!moduleMatch) return false;
+    const modulePath = moduleMatch[1];
+    return !repairedCode.includes(modulePath);
+  });
+
+  if (missing.length === 0) return repairedCode;
+
+  // Find the position after the last import line in the repaired code
+  const lines = repairedCode.split('\n');
+  let lastImportIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].trimStart().startsWith('import ')) lastImportIdx = i;
+  }
+
+  const insertAt = lastImportIdx >= 0 ? lastImportIdx + 1 : 0;
+  lines.splice(insertAt, 0, ...missing);
+  return lines.join('\n');
+}
+
+// ── Python helpers ────────────────────────────────────────────────────────────
+
+interface PylintError {
+  line: number;
+  column: number;
+  message: string;
+  messageId: string;
+  symbol: string;
+}
+
+interface PylintResult {
+  errors: PylintError[];
+}
+
+async function runPylintCheck(
+  backendPath: string,
+  pyFile: string,
+  onOutput: OnOutput
+): Promise<PylintResult> {
+  try {
+    const { output } = await runCommand(
+      'python3', ['-m', 'pylint', '--errors-only', '--output-format=json', pyFile],
+      backendPath, () => {} // suppress per-line output for pylint
+    );
+    try {
+      const parsed = JSON.parse(output);
+      if (!Array.isArray(parsed)) return { errors: [] };
+      return {
+        errors: parsed.map((item: any) => ({
+          line: item.line ?? 0,
+          column: item.column ?? 0,
+          message: item.message ?? '',
+          messageId: item['message-id'] ?? '',
+          symbol: item.symbol ?? '',
+        }))
+      };
+    } catch {
+      // pylint not installed or JSON parse failed — non-fatal
+      return { errors: [] };
+    }
+  } catch {
+    return { errors: [] };
+  }
+}
+
+async function repairPythonErrors(
+  filePath: string,
+  pylintErrors: PylintError[],
+  project: EngagementSpec,
+  llmConfig: LLMConfig,
+  onOutput: OnOutput,
+  llmService?: LLMService
+): Promise<boolean> {
+  let code: string;
+  try { code = fs.readFileSync(filePath, 'utf8'); } catch { return false; }
+
+  const isFlask = code.includes('from flask import') || code.includes('import flask');
+  const isFastAPI = code.includes('from fastapi import') || code.includes('import fastapi');
+
+  const frameworkNote = isFlask
+    ? '\nThis is a Flask application. Use Flask route decorators and patterns.'
+    : isFastAPI
+    ? '\nThis is a FastAPI application. Use FastAPI route decorators and async patterns.'
+    : '';
+
+  const errorSummary = pylintErrors
+    .map(e => `Line ${e.line}: [${e.symbol}] ${e.message}`)
+    .join('\n');
+
+  const prompt = `Fix the following pylint errors in this Python file.
+Return ONLY the complete corrected file contents — no explanation, no markdown fences.${frameworkNote}
+
+PYLINT ERRORS:
+${errorSummary}
+
+FILE:
+${code}`;
+
+  try {
+    const fixed = llmService
+      ? await llmService.callLLMDirect([{ role: 'user', content: prompt }], {
+          baseUrl: llmConfig.baseUrl,
+          apiKey: llmConfig.apiKey,
+          model: llmConfig.model ?? 'gpt-4-turbo-preview',
+        } as any).then((raw: string) => raw.replace(/^```(?:python)?\n?/, '').replace(/\n?```[\s\S]*$/, '').trim())
+      : await callLlm(prompt, llmConfig);
+
+    if (fixed && fixed.trim() !== code.trim()) {
+      fs.writeFileSync(filePath, fixed, 'utf8');
+      return true;
+    }
+    return false;
+  } catch (err: any) {
+    onOutput(`   ✗ Python repair failed: ${err?.message ?? err}\n`);
+    return false;
+  }
+}
+
+function findPythonEntryFile(backendPath: string): string[] {
+  // First: scan for Flask/FastAPI imports
+  const candidates = ['main.py', 'app.py', 'routes.py', 'server.py'];
+  const found: string[] = [];
+
+  for (const candidate of candidates) {
+    const full = path.join(backendPath, candidate);
+    if (!fs.existsSync(full)) continue;
+    try {
+      const content = fs.readFileSync(full, 'utf8');
+      // Prioritize files that define routes
+      if (content.includes('from flask import') || content.includes('from fastapi import') ||
+          content.includes('@app.route') || content.includes('@router.')) {
+        found.unshift(full); // put Flask/FastAPI files first
+      } else {
+        found.push(full);
+      }
+    } catch {
+      found.push(full);
+    }
+  }
+
+  return found;
 }
 
 // ── Layer 3: Smoke test ───────────────────────────────────────────────────────
